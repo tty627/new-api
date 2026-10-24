@@ -87,3 +87,60 @@ jobs:
         run: go test ./common/ -run Fork -count=1
       - name: Contract tests (SQLite, PostgreSQL, MySQL)
         run: go test ./test/contract/ -count=1 -v
+
+  # FORK-04: fresh install, upgrade from upstream, restart, upstream on fork DB.
+  migration-matrix:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        db: [postgres, mysql]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: newapi_mig
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: newapi_mig
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -proot" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GOWORK: 'off'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Build fork and upstream binaries
+        run: |
+          mkdir -p web/dist && touch web/dist/index.html
+          go build -o /tmp/fork .
+          git fetch --no-tags https://github.com/QuantumNous/new-api.git "$(cat UPSTREAM_COMMIT)"
+          git worktree add /tmp/up FETCH_HEAD
+          mkdir -p /tmp/up/web/dist && touch /tmp/up/web/dist/index.html
+          (cd /tmp/up && go build -o /tmp/upstream .)
+      - name: Run matrix
+        run: |
+          if [ "${{ matrix.db }}" = postgres ]; then
+            export SQL_DSN='postgres://postgres@127.0.0.1:5432/newapi_mig?sslmode=disable'
+            export QUERY='psql -h 127.0.0.1 -U postgres -d newapi_mig -Atc'
+          else
+            export SQL_DSN='root:root@tcp(127.0.0.1:3306)/newapi_mig'
+            export QUERY='mysql -h127.0.0.1 -uroot -proot newapi_mig -N -B -e'
+          fi
+          mkdir -p /tmp/mig && cd /tmp/mig
+          bash "$GITHUB_WORKSPACE/scripts/fork-migration-matrix.sh" /tmp/upstream /tmp/fork

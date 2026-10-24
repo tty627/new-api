@@ -15,6 +15,15 @@ Rules (FORK-02):
 | ID | Upstream file · function | Change | Requirement | Upstreamable? | Status |
 |---|---|---|---|---|---|
 | P1 | `Dockerfile` · go build `-ldflags` | `common.Version` comes from `scripts/fork-version.sh` instead of `VERSION` | FORK-05 | No | active |
+| P2 | `model/subscription.go` · `SubscriptionOrder.Insert` | When linking is enabled, insert order + plan snapshot in one transaction (`forkInsertOrderWithSnapshot`). Covers all four payment controllers. | LINK-01 | Yes | active |
+| P3 | `model/subscription.go` · `CompleteSubscriptionOrder` | After loading the plan, `forkPlanForOrderTx` swaps in the order snapshot; after `CreateUserSubscriptionFromPlanTx`, `forkLinkOrderTx` records the link in the same transaction | LINK-01, LINK-02 | Yes | active |
+| P4 | `model/subscription.go` · `PurchaseSubscriptionWithBalance` | After creating the order, `forkLinkBalanceOrderTx` writes snapshot + link | LINK-02 | Yes | active |
+| P5 | `model/main.go` · `migrateDB` AutoMigrate list | Append `&ForkSubscriptionOrderLink{}` | FORK-04 | Yes | active |
+| P6 | `router/api-router.go` · `subscriptionAdminRoute` | `GET /order-links/:trade_no` → `AdminGetSubscriptionOrderLink` | LINK-04 | Yes | active |
+| P7 | `middleware/access_token_routes.go` · route rule table | Declare the new route with `billing:read` (required by `TestAccessTokenRouteRulesCoverEveryDashboardRoute`) | LINK-04 | Yes | active |
+| P8 | `main.go` · `main` | `link-backfill` subcommand dispatch, next to the upstream `plugin` subcommand | LINK-03 | No | active |
+
+P2–P7 are one upstreamable unit (subscription order snapshot + entitlement link). `FORK_SUBSCRIPTION_LINK_ENABLED=false` turns P2–P4 back into upstream behaviour without a rebuild.
 
 ## Fork-owned files
 
@@ -22,6 +31,10 @@ Rules (FORK-02):
 - `scripts/fork-version.sh`
 - `.github/workflows/fork-guard.yml`
 - `common/version_fork_test.go`
+- `model/subscription_link_fork.go`, `model/subscription_link_fork_test.go` (table `fork_subscription_order_links`)
+- `controller/subscription_link_fork.go`
+- `subscription_link_backfill_fork.go` (`new-api link-backfill [--apply] [--window 300]`)
+- `scripts/fork-migration-matrix.sh`
 - `test/contract/` (DEP-01 … DEP-05 contract tests; `testdata/money_golden.json` is shared with the payment bridge)
 
 ## Running the contract tests

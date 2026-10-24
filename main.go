@@ -51,6 +51,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "plugin" {
 		os.Exit(jsplugin.RunCLI(os.Args[2:], os.Stdout, os.Stderr))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "link-backfill" { // fork: LINK-03
+		os.Exit(runLinkBackfill(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	startTime := time.Now()
 	kitutil.SetLogging(common.SysLog, func(message string) {
 		logger.LogError(nil, message)

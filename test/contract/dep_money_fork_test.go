@@ -34,29 +34,42 @@ func TestDEP03_MoneySerialization(t *testing.T) {
 	forEachDB(t, func(t *testing.T, db *gorm.DB) {
 		configureEpay(t)
 		user := createUser(t, db, 0)
-		gin.SetMode(gin.TestMode)
-		router := gin.New()
-		router.POST("/api/subscription/epay/pay", func(c *gin.Context) {
-			c.Set("id", user.Id)
-			controller.SubscriptionRequestEpay(c)
-		})
+		router := newPayRouter(user.Id)
 		for _, input := range moneyInputs {
 			plan := createPlan(t, db, input)
-			body, _ := json.Marshal(map[string]any{"plan_id": plan.Id, "payment_method": "alipay"})
-			req := httptest.NewRequest(http.MethodPost, "/api/subscription/epay/pay", bytes.NewReader(body))
-			req.Header.Set("Content-Type", "application/json")
-			rec := httptest.NewRecorder()
-			router.ServeHTTP(rec, req)
-
-			var resp struct {
-				Message string            `json:"message"`
-				Data    map[string]string `json:"data"`
-			}
-			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
-			require.Equal(t, "success", resp.Message, rec.Body.String())
-			assert.Equal(t, golden[input], resp.Data["money"], "price %v", input)
+			data := requestSubscriptionPay(t, router, plan.Id)
+			assert.Equal(t, golden[input], data["money"], "price %v", input)
 		}
 	})
+}
+
+// newPayRouter serves the subscription Epay request handler as userID.
+func newPayRouter(userID int) *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.POST("/api/subscription/epay/pay", func(c *gin.Context) {
+		c.Set("id", userID)
+		controller.SubscriptionRequestEpay(c)
+	})
+	return router
+}
+
+// requestSubscriptionPay creates a pending order and returns the signed form
+// New API hands to the browser for submission to Epay.
+func requestSubscriptionPay(t *testing.T, router http.Handler, planID int) map[string]string {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{"plan_id": planID, "payment_method": "alipay"})
+	req := httptest.NewRequest(http.MethodPost, "/api/subscription/epay/pay", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	var resp struct {
+		Message string            `json:"message"`
+		Data    map[string]string `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+	require.Equal(t, "success", resp.Message, rec.Body.String())
+	return resp.Data
 }
 
 // readMoneyGolden loads the shared golden file and checks it matches Go's
