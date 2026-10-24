@@ -376,6 +376,7 @@ func migrateDB() error {
 		&CasbinRule{},
 		&AuthzRole{},
 		&UserAccessToken{},
+		&ForkSubscriptionOrderLink{}, // fork: FORK-04
 	)
 	if err != nil {
 		return err

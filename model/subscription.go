@@ -231,6 +231,9 @@ func (o *SubscriptionOrder) Insert() error {
 	if o.CreateTime == 0 {
 		o.CreateTime = common.GetTimestamp()
 	}
+	if forkSubscriptionLinkEnabled() { // fork: LINK-01, see PATCHES.md
+		return forkInsertOrderWithSnapshot(o)
+	}
 	return DB.Create(o).Error
 }
 
@@ -597,6 +600,9 @@ func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedP
 		if err != nil {
 			return err
 		}
+		if plan, err = forkPlanForOrderTx(tx, &order, plan); err != nil { // fork: LINK-01
+			return err
+		}
 		if !plan.Enabled {
 			// still allow completion for already purchased orders
 		}
@@ -608,6 +614,9 @@ func CompleteSubscriptionOrder(tradeNo string, providerPayload string, expectedP
 		}
 		subscription, err := CreateUserSubscriptionFromPlanTx(tx, order.UserId, plan, "order")
 		if err != nil {
+			return err
+		}
+		if err := forkLinkOrderTx(tx, &order, plan, subscription); err != nil { // fork: LINK-02
 			return err
 		}
 		if subscription.PrevUserGroup != "" {
@@ -819,6 +828,9 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 			ProviderPayload: fmt.Sprintf("charged_quota=%d", requiredQuota),
 		}
 		if err := tx.Create(order).Error; err != nil {
+			return err
+		}
+		if err := forkLinkBalanceOrderTx(tx, order, plan, subscription); err != nil { // fork: LINK-02
 			return err
 		}
 
