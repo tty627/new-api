@@ -4,7 +4,7 @@ name: Fork guard
 # FORK-02: PRs into `main` that touch upstream files must update PATCHES.md.
 on:
   push:
-    branches: [upstream]
+    branches: [upstream, main]
   pull_request:
     branches: [main]
 
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   upstream-mirror:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/upstream'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -49,3 +49,41 @@ jobs:
             printf '%s\n' "$upstream_changes"
             exit 1
           fi
+
+  # FORK-03: DEP-01 … DEP-05 contract tests gate every change to main.
+  contract:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd "mysqladmin ping -proot" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GOWORK: 'off'
+      TEST_POSTGRES_DSN: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
+      TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mysql
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Create frontend embed placeholder
+        run: mkdir -p web/dist && touch web/dist/index.html
+      - name: Fork version format
+        run: go test ./common/ -run Fork -count=1
+      - name: Contract tests (SQLite, PostgreSQL, MySQL)
+        run: go test ./test/contract/ -count=1 -v

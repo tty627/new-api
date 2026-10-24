@@ -22,7 +22,19 @@ Rules (FORK-02):
 - `scripts/fork-version.sh`
 - `.github/workflows/fork-guard.yml`
 - `common/version_fork_test.go`
-- `test/contract/` (DEP-01 … DEP-05 contract tests)
+- `test/contract/` (DEP-01 … DEP-05 contract tests; `testdata/money_golden.json` is shared with the payment bridge)
+
+## Running the contract tests
+
+```sh
+go test ./test/contract/ -count=1                       # SQLite only
+TEST_POSTGRES_DSN='postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable' \
+TEST_MYSQL_DSN='root:pass@tcp(127.0.0.1:3306)/mysql' \
+go test ./test/contract/ -count=1                       # full matrix (loopback servers only)
+CONTRACT_UPDATE_GOLDEN=1 go test ./test/contract/ -run DEP03   # regenerate money golden file
+```
+
+Each test creates an isolated database and drops it afterwards.
 
 ## Sync checklist (FORK-03)
 
