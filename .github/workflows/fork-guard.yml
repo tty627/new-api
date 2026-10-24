@@ -1,0 +1,51 @@
+name: Fork guard
+
+# FORK-01: the `upstream` branch only mirrors QuantumNous/new-api.
+# FORK-02: PRs into `main` that touch upstream files must update PATCHES.md.
+on:
+  push:
+    branches: [upstream]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  upstream-mirror:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Branch must be contained in upstream history
+        run: |
+          git fetch --no-tags https://github.com/QuantumNous/new-api.git main
+          if ! git merge-base --is-ancestor HEAD FETCH_HEAD; then
+            echo "::error::upstream branch contains commits that are not in QuantumNous/new-api main"
+            exit 1
+          fi
+
+  patch-registry:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+      - name: Upstream file changes require a PATCHES.md update
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          upstream_changes=$(printf '%s\n' "$changed" | grep -Ev \
+            '^(PATCHES\.md|FORK_VERSION|UPSTREAM_COMMIT|scripts/fork-[^/]*|\.github/workflows/fork-[^/]*|test/contract/.*|.*_fork\.go|.*_fork_test\.go)$' || true)
+          if [ -n "$upstream_changes" ] && ! printf '%s\n' "$changed" | grep -qx 'PATCHES.md'; then
+            echo "::error::These upstream files changed without a PATCHES.md update:"
+            printf '%s\n' "$upstream_changes"
+            exit 1
+          fi
