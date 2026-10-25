@@ -5,7 +5,6 @@ package main
 // as the server. Run with the server stopped or on a replica first.
 
 import (
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 )
 
@@ -24,17 +24,37 @@ func runLinkBackfill(args []string, stdout, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if *window < 0 || fs.NArg() != 0 {
+		fmt.Fprintln(stderr, "window must be non-negative and positional arguments are not supported")
+		return 2
+	}
+	// This subcommand emits one JSON report on stdout. Database startup
+	// diagnostics belong on stderr, as they do for other command failures.
+	common.LogWriterMu.Lock()
+	previousWriter, previousErrorWriter := gin.DefaultWriter, gin.DefaultErrorWriter
+	gin.DefaultWriter, gin.DefaultErrorWriter = stderr, stderr
+	common.LogWriterMu.Unlock()
+	defer func() {
+		common.LogWriterMu.Lock()
+		gin.DefaultWriter, gin.DefaultErrorWriter = previousWriter, previousErrorWriter
+		common.LogWriterMu.Unlock()
+	}()
 	// common.InitEnv calls flag.Parse on os.Args, which would reject our
 	// subcommand flags; load only what database initialisation needs.
 	_ = godotenv.Load(".env")
 	if path := os.Getenv("SQLITE_PATH"); path != "" {
 		common.SQLitePath = path
 	}
-	common.IsMasterNode = os.Getenv("NODE_TYPE") != "slave"
-	if err := model.InitDB(); err != nil {
+	if err := model.InitSubscriptionLinkBackfillDB(*apply); err != nil {
 		fmt.Fprintln(stderr, "init db:", err)
 		return 1
 	}
+	sqlDB, err := model.DB.DB()
+	if err != nil {
+		fmt.Fprintln(stderr, "open db:", err)
+		return 1
+	}
+	defer sqlDB.Close()
 	decisions, err := model.PlanSubscriptionLinkBackfill(*window)
 	if err != nil {
 		fmt.Fprintln(stderr, "plan:", err)
@@ -48,11 +68,16 @@ func runLinkBackfill(args []string, stdout, stderr io.Writer) int {
 			unlinkable++
 		}
 	}
-	enc := json.NewEncoder(stdout)
-	enc.SetIndent("", "  ")
 	report := map[string]any{"apply": *apply, "window_seconds": *window, "backfill": linked,
 		"unlinkable": unlinkable, "decisions": decisions}
-	if err := enc.Encode(report); err != nil {
+	data, err := common.Marshal(report)
+	if err == nil {
+		data, err = common.IndentJson(data)
+	}
+	if err == nil {
+		_, err = fmt.Fprintln(stdout, string(data))
+	}
+	if err != nil {
 		fmt.Fprintln(stderr, "write report:", err)
 		return 1
 	}

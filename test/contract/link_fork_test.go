@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/Calcium-Ion/go-epay/epay"
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/controller"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/gin-gonic/gin"
@@ -30,6 +31,37 @@ func linkStatusViaAPI(t *testing.T, tradeNo string) model.SubscriptionLinkStatus
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
 	require.True(t, resp.Success, rec.Body.String())
 	return resp.Data
+}
+
+// LINK-03 must not infer a pair from ordering when several grants share the
+// same user, plan and timestamp, even though both sides have equal counts.
+func TestLINK_BackfillDoesNotGuessEqualCountPairs(t *testing.T) {
+	forEachDB(t, func(t *testing.T, db *gorm.DB) {
+		user := createUser(t, db, 0)
+		plan := createPlan(t, db, 10)
+		for _, tradeNo := range []string{"AMBIGUOUS-A", "AMBIGUOUS-B"} {
+			require.NoError(t, db.Create(&model.SubscriptionOrder{UserId: user.Id, PlanId: plan.Id,
+				TradeNo: tradeNo, Status: common.TopUpStatusSuccess, CompleteTime: 1_700_000_000}).Error)
+			require.NoError(t, db.Create(&model.UserSubscription{UserId: user.Id, PlanId: plan.Id,
+				Source: "order", StartTime: 1_700_000_001, Status: "active"}).Error)
+		}
+		decisions, err := model.PlanSubscriptionLinkBackfill(300)
+		require.NoError(t, err)
+		require.Len(t, decisions, 2)
+		var rows int64
+		require.NoError(t, db.Model(&model.ForkSubscriptionOrderLink{}).Count(&rows).Error)
+		assert.Zero(t, rows, "planning must not write link rows")
+		for _, decision := range decisions {
+			assert.Equal(t, model.LinkSourceUnlinkable, decision.Result)
+			assert.Zero(t, decision.UserSubscriptionId)
+		}
+		require.NoError(t, model.ApplySubscriptionLinkBackfill(decisions))
+		for _, tradeNo := range []string{"AMBIGUOUS-A", "AMBIGUOUS-B"} {
+			status, err := model.GetSubscriptionLinkStatus(tradeNo)
+			require.NoError(t, err)
+			assert.Equal(t, model.LinkStatusUnlinkable, status.Status)
+		}
+	})
 }
 
 // LINK-01/02/04 end to end on every database: an order placed through the

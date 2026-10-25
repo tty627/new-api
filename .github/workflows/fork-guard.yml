@@ -96,7 +96,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        db: [postgres, mysql]
+        db: [sqlite, postgres, mysql]
+        scenario: [fresh, upgrade]
     services:
       postgres:
         image: postgres:16
@@ -128,19 +129,28 @@ jobs:
       - name: Build fork and upstream binaries
         run: |
           mkdir -p web/dist && touch web/dist/index.html
-          go build -o /tmp/fork .
+          version=$(sh scripts/fork-version.sh)
+          go build -ldflags "-X github.com/QuantumNous/new-api/common.Version=$version" -o /tmp/fork .
           git fetch --no-tags https://github.com/QuantumNous/new-api.git "$(cat UPSTREAM_COMMIT)"
           git worktree add /tmp/up FETCH_HEAD
           mkdir -p /tmp/up/web/dist && touch /tmp/up/web/dist/index.html
           (cd /tmp/up && go build -o /tmp/upstream .)
       - name: Run matrix
         run: |
+          export MATRIX_DB='${{ matrix.db }}'
+          export MATRIX_SCENARIO='${{ matrix.scenario }}'
+          export EXPECTED_FORK_VERSION=$(sh scripts/fork-version.sh)
           if [ "${{ matrix.db }}" = postgres ]; then
             export SQL_DSN='postgres://postgres@127.0.0.1:5432/newapi_mig?sslmode=disable'
-            export QUERY='psql -h 127.0.0.1 -U postgres -d newapi_mig -Atc'
-          else
+            export QUERY='psql -h 127.0.0.1 -U postgres -d newapi_mig -v ON_ERROR_STOP=1 -Atc'
+          elif [ "${{ matrix.db }}" = mysql ]; then
             export SQL_DSN='root:root@tcp(127.0.0.1:3306)/newapi_mig'
             export QUERY='mysql -h127.0.0.1 -uroot -proot newapi_mig -N -B -e'
+          else
+            sudo apt-get update && sudo apt-get install -y sqlite3
+            export SQL_DSN='local'
+            export SQLITE_PATH='/tmp/mig/new-api.db'
+            export QUERY='sqlite3 -batch /tmp/mig/new-api.db'
           fi
           mkdir -p /tmp/mig && cd /tmp/mig
           bash "$GITHUB_WORKSPACE/scripts/fork-migration-matrix.sh" /tmp/upstream /tmp/fork
