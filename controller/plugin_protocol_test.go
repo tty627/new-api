@@ -244,7 +244,7 @@ func TestServeTaskPluginProtocolDisconnectDuringTerminalSettlementStopsOnlyObser
 	previousMemoryCache := common.MemoryCacheEnabled
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&model.Channel{}, &model.Task{}))
+	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.ForkBillingSession{}, &model.ForkBillingEvent{}))
 	model.DB = database
 	common.MemoryCacheEnabled = false
 	t.Cleanup(func() {
@@ -252,12 +252,14 @@ func TestServeTaskPluginProtocolDisconnectDuringTerminalSettlementStopsOnlyObser
 		common.MemoryCacheEnabled = previousMemoryCache
 	})
 	baseURL := "https://example.com"
+	require.NoError(t, database.Create(&model.User{Id: 71, Username: "terminal-settlement-user", Quota: 1000, UsedQuota: 10}).Error)
 	channel := model.Channel{
-		Type:    constant.ChannelTypeTaskPlugin,
-		Name:    "terminal-settlement",
-		Key:     "test-key",
-		BaseURL: &baseURL,
-		Status:  common.ChannelStatusEnabled,
+		Type:      constant.ChannelTypeTaskPlugin,
+		Name:      "terminal-settlement",
+		Key:       "test-key",
+		BaseURL:   &baseURL,
+		Status:    common.ChannelStatusEnabled,
+		UsedQuota: 10,
 	}
 	require.NoError(t, database.Create(&channel).Error)
 	task := model.Task{

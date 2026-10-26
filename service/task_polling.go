@@ -91,14 +91,11 @@ func sweepTimedOutTasks(ctx context.Context) {
 		task.FinishTime = now
 		if isLegacy {
 			task.FailReason = legacyReason
-			// 旧系统任务明确不退款，随终态 CAS 一并清掉 quota，
-			// 避免留下可再次退款的计费状态。
-			task.Quota = 0
 		} else {
 			task.FailReason = reason
 		}
 
-		won, err := task.UpdateWithStatus(oldStatus)
+		won, err := commitTerminalTaskBilling(ctx, nil, task, relaycommon.FailTaskInfo(task.FailReason), oldStatus, false)
 		if err != nil {
 			logger.LogError(ctx, common.LogText("sweepTimedOutTasks CAS update error for task %s: %v", task.TaskID, err))
 			continue
@@ -108,9 +105,8 @@ func sweepTimedOutTasks(ctx context.Context) {
 			continue
 		}
 		timedOutCount++
-		if !isLegacy && task.Quota != 0 {
-			RefundTaskQuota(ctx, task, reason)
-		}
+		// fork: elapsed time is not evidence that the provider did no billable
+		// work. Keep the reservation and original quota for reconciliation.
 	}
 
 	if timedOutCount > 0 {
@@ -375,7 +371,13 @@ func updateBatchTasks(ctx context.Context, adaptor BatchTaskPollingAdaptor, chan
 
 		isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 		terminalTransition := isDone && snap.Status != task.Status
-		won, updateErr := task.UpdateWithStatus(snap.Status)
+		var won bool
+		var updateErr error
+		if terminalTransition {
+			won, updateErr = commitTerminalTaskBilling(ctx, adaptor, task, &responseItem.TaskInfo, snap.Status, true)
+		} else {
+			won, updateErr = task.UpdateWithStatus(snap.Status)
+		}
 		if updateErr != nil {
 			common.SysLog(common.LogText("UpdateSunoTask task error: %s", updateErr.Error()))
 			continue
@@ -612,7 +614,7 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 
 	isDone := task.Status == model.TaskStatusSuccess || task.Status == model.TaskStatusFailure
 	if isDone && snap.Status != task.Status {
-		won, err := task.UpdateWithStatus(snap.Status)
+		won, err := commitTerminalTaskBilling(ctx, adaptor, task, taskResult, snap.Status, true)
 		if err != nil {
 			logger.LogError(ctx, common.LogText("UpdateWithStatus failed for task %s: %s", task.TaskID, err.Error()))
 			shouldFinalizeBilling = false
@@ -639,9 +641,18 @@ func updateVideoSingleTask(ctx context.Context, adaptor TaskPollingAdaptor, ch *
 // finalizeTerminalTask 终态统一收尾（状态 CAS 赢家调用，恰好一次）：采样 + 结算 + 失败兜底退款。
 func finalizeTerminalTask(ctx context.Context, adaptor TaskPollingAdaptor, task *model.Task, taskResult *relaycommon.TaskInfo) {
 	perfmetrics.RecordTaskResult(task, taskResult)
-	billingSettled := settleTaskBillingOnComplete(ctx, adaptor, task, taskResult)
-	if task.Status == model.TaskStatusFailure && !billingSettled && task.Quota != 0 {
+	id, err := billingTaskRequestID(ctx, task)
+	if err != nil {
+		return
+	}
+	row, err := model.GetBillingSession(ctx, id)
+	if err != nil || row.ActualQuota == nil {
+		return
+	}
+	if row.Status == model.BillingRefundPending {
 		RefundTaskQuota(ctx, task, task.FailReason)
+	} else if row.Status == model.BillingSettlePending {
+		RecalculateTaskQuota(ctx, task, int(*row.ActualQuota), common.NewMessage("Settled from the persisted upstream task outcome"))
 	}
 }
 
@@ -815,14 +826,14 @@ func failTaskFromPoll(ctx context.Context, adaptor TaskPollingAdaptor, task *mod
 		task.FinishTime = now
 	}
 	task.FailReason = reason
-	won, err := task.UpdateWithStatus(fromStatus)
+	won, err := commitTerminalTaskBilling(ctx, adaptor, task, relaycommon.FailTaskInfo(reason), fromStatus, false)
 	if err != nil {
 		return err
 	}
 	if !won {
 		return nil
 	}
-	finalizeTerminalTask(ctx, adaptor, task, relaycommon.FailTaskInfo(reason))
+	// An unavailable poll result does not prove absence of billable work.
 	return nil
 }
 

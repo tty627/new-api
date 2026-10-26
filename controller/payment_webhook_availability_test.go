@@ -1,6 +1,7 @@
 package controller
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/Calcium-Ion/go-epay/epay"
+	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/setting"
 	"github.com/QuantumNous/new-api/setting/operation_setting"
@@ -254,6 +256,16 @@ func TestEpayCallbacksVerifyBeforeSettlement(t *testing.T) {
 		for _, method := range []string{http.MethodGet, http.MethodPost} {
 			for _, tc := range cases {
 				t.Run(endpoint.name+"/"+method+"/"+tc.name, func(t *testing.T) {
+					var logs bytes.Buffer
+					common.LogWriterMu.Lock()
+					oldWriter, oldErrorWriter := gin.DefaultWriter, gin.DefaultErrorWriter
+					gin.DefaultWriter, gin.DefaultErrorWriter = &logs, &logs
+					common.LogWriterMu.Unlock()
+					t.Cleanup(func() {
+						common.LogWriterMu.Lock()
+						gin.DefaultWriter, gin.DefaultErrorWriter = oldWriter, oldErrorWriter
+						common.LogWriterMu.Unlock()
+					})
 					params := url.Values{
 						"pid": {"epay_id"}, "type": {"alipay"}, "money": {"1.00"},
 						"name": {tc.productName}, "out_trade_no": {tc.tradeNo},
@@ -278,6 +290,9 @@ func TestEpayCallbacksVerifyBeforeSettlement(t *testing.T) {
 						assert.Equal(t, wantBody, recorder.Body.String())
 					}
 					assert.Equal(t, wantLocation, recorder.Header().Get("Location"))
+					if len(tc.sign) > 10 {
+						assert.NotContains(t, logs.String(), tc.sign, "payment signatures must not reach operational logs")
+					}
 				})
 			}
 		}

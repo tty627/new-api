@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/QuantumNous/new-api/model"
+	"gorm.io/gorm"
 )
 
 // ---------------------------------------------------------------------------
@@ -116,7 +117,13 @@ func (s *SubscriptionFunding) Settle(delta int) error {
 	if delta == 0 {
 		return nil
 	}
-	return model.PostConsumeUserSubscriptionDelta(s.subscriptionId, int64(delta))
+	return model.DB.Transaction(func(tx *gorm.DB) error {
+		return model.SettleSubscriptionPreConsumeTx(tx, s.requestId, s.preConsumed+int64(delta))
+	})
+}
+
+func resizeSubscriptionFunding(requestID string, total int64) error {
+	return model.DB.Transaction(func(tx *gorm.DB) error { return model.ResizeSubscriptionPreConsumeTx(tx, requestID, total) })
 }
 
 func (s *SubscriptionFunding) Refund() error {

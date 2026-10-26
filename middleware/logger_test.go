@@ -31,6 +31,8 @@ func TestSetUpLoggerMasksQueryCredentials(t *testing.T) {
 		{"/v1/models?alt=sse&api-version=2024-02-01", "/v1/models?alt=sse&api-version=2024-02-01"},
 		{"/v1/models", "/v1/models"},
 		{"/%61pi/oauth/test?code=secret&state=secret", "/api/oauth/test"},
+		{"/api/user/epay/notify?sign=payment-secret&out_trade_no=private-order", "/api/user/epay/notify"},
+		{"/api/subscription/epay/return?sign=payment-secret&trade_no=private-order", "/api/subscription/epay/return"},
 	} {
 		t.Run(tc.target, func(t *testing.T) {
 			var output bytes.Buffer

@@ -74,6 +74,7 @@ func RefundFailedRequestBilling(c *gin.Context, info *relaycommon.RelayInfo, api
 		return nil
 	}
 	apiErr = service.NormalizeViolationFeeError(apiErr)
+	info.LastError = apiErr // fork: refund must distinguish confirmed failure from unknown upstream result
 	if info.Billing != nil {
 		info.Billing.Refund(c)
 	}

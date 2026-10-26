@@ -377,6 +377,8 @@ func migrateDB() error {
 		&AuthzRole{},
 		&UserAccessToken{},
 		&ForkSubscriptionOrderLink{}, // fork: FORK-04
+		&ForkBillingSession{},
+		&ForkBillingEvent{},
 	)
 	if err != nil {
 		return err

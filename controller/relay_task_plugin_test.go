@@ -480,6 +480,7 @@ func taskSubmissionRelayInfo(billing relaycommon.BillingSettler) *relaycommon.Re
 // runs leave a record.
 func openTaskDialectDatabase(t *testing.T, models ...any) (*gorm.DB, common.DatabaseType) {
 	t.Helper()
+	models = append(models, &model.ForkBillingSession{}, &model.ForkBillingEvent{})
 	dialect := common.DatabaseType(os.Getenv("TEST_TASK_DB_DIALECT"))
 	var driver gorm.Dialector
 	switch dialect {

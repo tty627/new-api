@@ -77,11 +77,20 @@ else
 fi
 q "INSERT INTO subscription_plans (title, price_amount, currency, duration_unit, duration_value, enabled, total_amount) VALUES ('mig', 9.9, 'CNY', 'month', 1, true, 100)"
 q "INSERT INTO subscription_orders (user_id, plan_id, money, trade_no, payment_method, payment_provider, status, create_time) VALUES (1, 1, 9.9, 'MIGOLD', 'alipay', 'epay', 'pending', 1)"
+# A real pre-upgrade reservation must keep an unknown cycle; assigning the
+# current generation would let a late refund consume a newly reset allowance.
+q "INSERT INTO user_subscriptions (user_id, plan_id, amount_total, amount_used, start_time, end_time, status, source) VALUES (1, 1, 1000, 100, 1, 4102444800, 'active', 'admin')"
+q "INSERT INTO subscription_pre_consume_records (request_id, user_id, user_subscription_id, pre_consumed, status) VALUES ('MIG-LEGACY-RESERVATION', 1, 1, 100, 'consumed')"
 if [ "$SCENARIO" = upgrade ]; then
   run "$FORK" 2-fork-upgrade
 fi
 expect "fork table installed" "$(table_count)" 1
 expect "pending order kept" "$(q "SELECT COUNT(*) FROM subscription_orders WHERE trade_no = 'MIGOLD' AND status = 'pending' AND money = 9.9")" 1
+expect "billing session table installed" "$(table_count fork_billing_sessions)" 1
+expect "billing event table installed" "$(table_count fork_billing_events)" 1
+expect "legacy usage kept" "$(q "SELECT amount_used FROM user_subscriptions WHERE id = 1")" 100
+expect "legacy cycle is unknown" "$(q "SELECT COUNT(*) FROM subscription_pre_consume_records WHERE request_id = 'MIG-LEGACY-RESERVATION' AND quota_cycle IS NULL AND settled_amount IS NULL AND cycle_amount_total = 0")" 1
+expect "initial cycle generation" "$(q "SELECT quota_cycle FROM user_subscriptions WHERE id = 1")" 0
 
 # Schema-only sentinels exercise each independent unique key, including the
 # multiple-NULL behaviour needed for pending orders. These are not paid orders.
@@ -97,6 +106,8 @@ reject "trade_no unique" "INSERT INTO fork_subscription_order_links (order_id, t
 reject "subscription unique" "INSERT INTO fork_subscription_order_links (order_id, trade_no, plan_id, snapshot_source, user_subscription_id) VALUES (92003, 'MIGDUP3', 1, 'order', 91001)"
 expect "multiple pending NULL links" "$(q "SELECT COUNT(*) FROM fork_subscription_order_links WHERE user_subscription_id IS NULL")" 2
 run "$FORK" 3-fork-restart
+expect "unknown cycle kept on restart" "$(q "SELECT COUNT(*) FROM subscription_pre_consume_records WHERE request_id = 'MIG-LEGACY-RESERVATION' AND quota_cycle IS NULL AND settled_amount IS NULL")" 1
+expect "legacy usage kept on restart" "$(q "SELECT amount_used FROM user_subscriptions WHERE id = 1")" 100
 expect "link rows kept on restart" "$(q "SELECT COUNT(*) FROM fork_subscription_order_links")" 3
 reject "subscription still unique after restart" "INSERT INTO fork_subscription_order_links (order_id, trade_no, plan_id, snapshot_source, user_subscription_id) VALUES (92004, 'MIGDUP4', 1, 'order', 91001)"
 run "$UP" 4-upstream-on-fork-db
