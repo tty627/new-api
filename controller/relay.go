@@ -520,6 +520,11 @@ func executeTaskSubmissionWith(
 	defer func() {
 		if !durable && relayInfo.Billing != nil {
 			diagnostics.refund(stage)
+			if result != nil { // fork: upstream accepted; a local insert/reserve failure is not proof of no charge
+				relayInfo.LastError = types.NewError(errors.New("accepted task was not durably recorded"), types.ErrorCodeBadResponseBody)
+			} else if taskErr != nil {
+				relayInfo.LastError = taskSubmissionAPIError(taskErr)
+			}
 			relayInfo.Billing.Refund(c)
 		}
 	}()
@@ -715,7 +720,7 @@ func executeTaskSubmissionWith(
 		}
 	}
 	diagnostics.insertStart(task)
-	if insertErr := task.InsertWithContext(c.Request.Context(), insertOmits...); insertErr != nil {
+	if insertErr := service.PersistAcceptedTask(c, relayInfo, task, result.Quota, insertOmits...); insertErr != nil {
 		common.SysError(common.LogText("insert task error: %s", insertErr.Error()))
 		taskErr = service.TaskErrorWrapperLocal(errors.New("failed to persist task"), "task_insert_failed", http.StatusInternalServerError)
 		diagnostics.failed("insert", "database_error", taskErr, false)
@@ -726,7 +731,7 @@ func executeTaskSubmissionWith(
 	diagnostics.durable(task)
 	diagnostics.settleStart(task, result.Quota)
 
-	if settleErr := service.SettleBilling(c, relayInfo, result.Quota); settleErr != nil {
+	if settleErr := service.AcceptTaskBilling(c, relayInfo, task, result.Quota); settleErr != nil {
 		common.SysError(common.LogText("settle task billing error: %s", settleErr.Error()))
 		taskErr = service.TaskErrorWrapperLocal(errors.New("failed to settle task billing"), "task_billing_settlement_failed", http.StatusInternalServerError)
 		diagnostics.failed("settle", "billing_error", taskErr, true)
@@ -820,7 +825,20 @@ func taskSubmissionAPIError(taskErr *taskdto.TaskError) *types.NewAPIError {
 	if err == nil {
 		err = errors.New(taskErr.Message)
 	}
-	return types.NewOpenAIError(err, types.ErrorCodeBadResponseStatusCode, taskErr.StatusCode)
+	code := types.ErrorCodeBadResponseStatusCode
+	switch taskErr.Code { // fork: retain uncertainty across the task error wrapper
+	case "do_request_failed":
+		code = types.ErrorCodeDoRequestFailed
+	case "read_response_body_failed":
+		code = types.ErrorCodeReadResponseBodyFailed
+	case "plugin_submit_response_invalid", "task_submit_failed":
+		code = types.ErrorCodeBadResponseBody
+	case "fail_to_fetch_task":
+		if taskErr.LocalError {
+			code = types.ErrorCodeEmptyResponse
+		}
+	}
+	return types.NewOpenAIError(err, code, taskErr.StatusCode)
 }
 
 // decideTaskRetry is the single retry decision for task submissions. The
@@ -831,6 +849,8 @@ func decideTaskRetry(c *gin.Context, taskErr *taskdto.TaskError, retryTimes int)
 	switch {
 	case taskErr == nil:
 		stop.Reason = "request_completed"
+	case service.BillingFailureOutcomeUnknown(taskSubmissionAPIError(taskErr)):
+		stop.Reason = "upstream_outcome_unknown"
 	case taskErr.NoRetry:
 		stop.Reason = "task_accepted"
 	case service.ShouldSkipRetryAfterChannelAffinityFailure(c):

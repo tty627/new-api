@@ -233,6 +233,9 @@ func TestServeTaskPluginProtocolDisconnectBeforeDurableBarrierPersistsAndSettles
 }
 
 func TestServeTaskPluginProtocolDisconnectDuringTerminalSettlementStopsOnlyObservation(t *testing.T) {
+	previousRedis, previousBatch := common.RedisEnabled, common.BatchUpdateEnabled
+	common.RedisEnabled, common.BatchUpdateEnabled = false, false
+	t.Cleanup(func() { common.RedisEnabled, common.BatchUpdateEnabled = previousRedis, previousBatch })
 	pinned := compilePluginProtocolTestEndpoint(t, "disconnect-terminal-settlement", `
 		export const protocols = {openai_responses: {
 			renderEvents: function() { return {events: [], done: false}; },
@@ -244,7 +247,7 @@ func TestServeTaskPluginProtocolDisconnectDuringTerminalSettlementStopsOnlyObser
 	previousMemoryCache := common.MemoryCacheEnabled
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&model.Channel{}, &model.Task{}))
+	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.ForkBillingSession{}, &model.ForkBillingEvent{}))
 	model.DB = database
 	common.MemoryCacheEnabled = false
 	t.Cleanup(func() {
@@ -252,12 +255,14 @@ func TestServeTaskPluginProtocolDisconnectDuringTerminalSettlementStopsOnlyObser
 		common.MemoryCacheEnabled = previousMemoryCache
 	})
 	baseURL := "https://example.com"
+	require.NoError(t, database.Create(&model.User{Id: 71, Username: "terminal-settlement-user", Quota: 1000, UsedQuota: 10}).Error)
 	channel := model.Channel{
-		Type:    constant.ChannelTypeTaskPlugin,
-		Name:    "terminal-settlement",
-		Key:     "test-key",
-		BaseURL: &baseURL,
-		Status:  common.ChannelStatusEnabled,
+		Type:      constant.ChannelTypeTaskPlugin,
+		Name:      "terminal-settlement",
+		Key:       "test-key",
+		BaseURL:   &baseURL,
+		Status:    common.ChannelStatusEnabled,
+		UsedQuota: 10,
 	}
 	require.NoError(t, database.Create(&channel).Error)
 	task := model.Task{
@@ -269,9 +274,16 @@ func TestServeTaskPluginProtocolDisconnectDuringTerminalSettlementStopsOnlyObser
 		Status:    model.TaskStatusSubmitted,
 		PrivateData: model.TaskPrivateData{
 			UpstreamTaskID: "upstream-terminal",
+			BillingSource:  "wallet",
+			Execution:      &model.TaskExecutionSnapshot{RequestID: "terminal-disconnect-billing"},
 		},
 	}
 	require.NoError(t, database.Create(&task).Error)
+	require.NoError(t, database.Create(&model.ForkBillingSession{
+		RequestID: "terminal-disconnect-billing", UserID: task.UserId, Playground: true,
+		FundingSource: "wallet", TaskID: task.ID, ReservedQuota: 10, TaskAccountedQuota: 10,
+		TaskAccepted: true, Status: model.BillingTaskActive, Revision: 1,
+	}).Error)
 
 	c, recorder := newPluginProtocolTestContext(true, true)
 	requestContext, cancel := context.WithCancel(c.Request.Context())

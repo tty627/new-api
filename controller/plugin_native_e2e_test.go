@@ -25,48 +25,6 @@ import (
 	"gorm.io/gorm"
 )
 
-type nativeRouteBilling struct {
-	events      []string
-	preConsumed int
-	userID      int
-	settled     bool
-}
-
-func (b *nativeRouteBilling) Settle(int) error {
-	b.events = append(b.events, "settle")
-	b.settled = true
-	return nil
-}
-
-func (b *nativeRouteBilling) Refund(*gin.Context) {
-	b.events = append(b.events, "refund")
-	if !b.settled && b.preConsumed > 0 {
-		_ = model.IncreaseUserQuota(b.userID, b.preConsumed, true)
-		b.preConsumed = 0
-	}
-}
-
-func (b *nativeRouteBilling) NeedsRefund() bool {
-	return !b.settled && b.preConsumed > 0
-}
-
-func (b *nativeRouteBilling) GetPreConsumedQuota() int {
-	return b.preConsumed
-}
-
-func (b *nativeRouteBilling) Reserve(quota int) error {
-	b.events = append(b.events, "reserve")
-	if err := model.DecreaseUserQuota(b.userID, quota, true); err != nil {
-		return err
-	}
-	b.preConsumed = quota
-	return nil
-}
-
-// ReserveBeforeSubmit holds nothing: this fixture charges in Reserve once the
-// upstream has accepted.
-func (*nativeRouteBilling) ReserveBeforeSubmit(int) error { return nil }
-
 func TestKlingNativeRouteSubmitPollSettleAndQuery(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	service.InitHttpClient()
@@ -79,7 +37,7 @@ func TestKlingNativeRouteSubmitPollSettleAndQuery(t *testing.T) {
 	previousRedisEnabled := common.RedisEnabled
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}))
+	require.NoError(t, database.AutoMigrate(&model.User{}, &model.Channel{}, &model.Task{}, &model.Log{}, &model.ForkBillingSession{}, &model.ForkBillingEvent{}))
 	model.DB = database
 	model.LOG_DB = database
 	common.MemoryCacheEnabled = false
@@ -169,15 +127,18 @@ func TestKlingNativeRouteSubmitPollSettleAndQuery(t *testing.T) {
 	require.Equal(t, "text_to_video", submitContext.GetString("task_action"))
 	require.Nil(t, middleware.SetupContextForSelectedChannel(submitContext, &channel, "kling-v1"))
 
-	billing := &nativeRouteBilling{userID: 7}
+	requestID := common.NewRequestId()
+	submitContext.Set(common.RequestIdKey, requestID)
 	relayInfo := &relaycommon.RelayInfo{
+		RequestId:       requestID,
 		UserId:          7,
 		UserGroup:       "default",
 		UsingGroup:      "default",
 		UserQuota:       1_000_000,
 		TokenGroup:      "default",
 		OriginModelName: "kling-v1",
-		Billing:         billing,
+		IsPlayground:    true,
+		ForcePreConsume: true,
 		TaskRelayInfo: &relaycommon.TaskRelayInfo{
 			Action:        submitContext.GetString("task_action"),
 			PublicTaskID:  "task_kling_public",
@@ -185,10 +146,11 @@ func TestKlingNativeRouteSubmitPollSettleAndQuery(t *testing.T) {
 		},
 	}
 
+	relayInfo.UserSetting.BillingPreference = "wallet_only"
 	outcome, taskErr := executeTaskSubmissionWith(submitContext, relayInfo, relay.RelayTaskSubmit)
 	require.Nil(t, taskErr)
 	require.NotNil(t, outcome)
-	require.Equal(t, []string{"reserve", "settle"}, billing.events)
+	require.NotNil(t, relayInfo.Billing)
 	require.False(t, submitContext.Writer.Written())
 
 	presentTaskSubmission(submitContext, outcome)

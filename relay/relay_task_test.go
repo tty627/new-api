@@ -87,7 +87,7 @@ func TestRealtimeFetchAppliesChannelHeaderOverrides(t *testing.T) {
 
 func TestRealtimeFetchRefundsTaskItFindsFailed(t *testing.T) {
 	database := setupRelayChannelDB(t)
-	require.NoError(t, database.AutoMigrate(&model.Task{}, &model.User{}, &model.Log{}))
+	require.NoError(t, database.AutoMigrate(&model.Task{}, &model.User{}, &model.Log{}, &model.ForkBillingSession{}, &model.ForkBillingEvent{}))
 	previousLogDB := model.LOG_DB
 	previousFactory := service.GetTaskAdaptorFunc
 	previousRedis := common.RedisEnabled
@@ -109,18 +109,24 @@ func TestRealtimeFetchRefundsTaskItFindsFailed(t *testing.T) {
 		_, _ = w.Write([]byte(`{"name":"operations/task-1","done":true,"error":{"code":3,"message":"blocked by safety"}}`))
 	}))
 	t.Cleanup(server.Close)
-	channel := &model.Channel{Name: "realtime-refund", Type: constant.ChannelTypeGemini, Key: "channel-key", BaseURL: &server.URL}
+	channel := &model.Channel{Name: "realtime-refund", Type: constant.ChannelTypeGemini, Key: "channel-key", BaseURL: &server.URL, UsedQuota: 1000}
 	require.NoError(t, database.Create(channel).Error)
-	require.NoError(t, database.Create(&model.User{Id: 7, Username: "realtime-owner", Quota: 100}).Error)
+	require.NoError(t, database.Create(&model.User{Id: 7, Username: "realtime-owner", Quota: 100, UsedQuota: 1000}).Error)
 	task := &model.Task{
 		TaskID: "public-task", Platform: constant.TaskPlatform(strconv.Itoa(constant.ChannelTypeGemini)),
 		UserId: 7, ChannelId: channel.Id, Quota: 1000,
 		Status: model.TaskStatusInProgress, Progress: "50%",
 		PrivateData: model.TaskPrivateData{
 			Key: "channel-key", UpstreamTaskID: base64.RawURLEncoding.EncodeToString([]byte("operations/task-1")),
+			BillingSource: "wallet", Execution: &model.TaskExecutionSnapshot{RequestID: "realtime-refund-billing"},
 		},
 	}
 	require.NoError(t, database.Create(task).Error)
+	require.NoError(t, database.Create(&model.ForkBillingSession{
+		RequestID: "realtime-refund-billing", UserID: task.UserId, Playground: true,
+		FundingSource: "wallet", TaskID: task.ID, ReservedQuota: 1000, TaskAccountedQuota: 1000,
+		TaskAccepted: true, Status: model.BillingTaskActive, Revision: 1,
+	}).Error)
 
 	tryRealtimeFetch(task, true)
 

@@ -337,7 +337,8 @@ func TestUpdateBatchTasksSettlesTieredUsageForTerminalStates(t *testing.T) {
 				ExprVersion:      1,
 				TaskUsageBilling: true,
 			}
-			require.NoError(t, model.DB.Create(task).Error)
+			seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
+			seedAcceptedWalletTask(t, task)
 
 			upstreamID := task.GetUpstreamTaskID()
 			reason := ""
@@ -404,7 +405,8 @@ func TestUpdateBatchTasksRefundsFailedTieredTask(t *testing.T) {
 		UsageFacts:       map[string]any{"units": float64(5)},
 		EstimatedTier:    "actual",
 	}
-	require.NoError(t, model.DB.Create(task).Error)
+	seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
+	seedAcceptedWalletTask(t, task)
 
 	upstreamID := task.GetUpstreamTaskID()
 	adaptor := &batchPollingAdaptor{results: map[string]*BatchTaskResult{
@@ -452,7 +454,8 @@ func TestUpdateBatchTasksRefundsFailedTaskWithoutUsageSettlement(t *testing.T) {
 	task.Properties.OriginModelName = "missing-batch-token-price"
 	task.PrivateData.UpstreamTaskID = "upstream_batch_refund"
 	task.PrivateData.BillingContext.OriginModelName = "missing-batch-token-price"
-	require.NoError(t, model.DB.Create(task).Error)
+	seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
+	seedAcceptedWalletTask(t, task)
 
 	upstreamID := task.GetUpstreamTaskID()
 	adaptor := &batchPollingAdaptor{results: map[string]*BatchTaskResult{
@@ -670,7 +673,8 @@ func TestUpdateSunoTasksStalePollsRefundExactlyOnce(t *testing.T) {
 	task.Progress = "50%"
 	task.SubmitTime = time.Now().Unix()
 	task.PrivateData.UpstreamTaskID = upstreamTaskID
-	require.NoError(t, model.DB.Create(task).Error)
+	seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
+	seedAcceptedWalletTask(t, task)
 
 	var firstPollTask model.Task
 	var staleSecondPollTask model.Task
@@ -732,7 +736,7 @@ func TestRunTaskPollingOnceDoesNotRefundHistoricalFailedTask(t *testing.T) {
 	assert.Equal(t, int64(0), countLogs(t))
 }
 
-func TestSweepTimedOutTasksHonorsRefundRolloutBoundary(t *testing.T) {
+func TestSweepTimedOutTasksPreservesUnknownBilling(t *testing.T) {
 	truncate(t)
 
 	const (
@@ -750,10 +754,10 @@ func TestSweepTimedOutTasksHonorsRefundRolloutBoundary(t *testing.T) {
 	require.NoError(t, model.DB.Create(legacyTask).Error)
 
 	modernTask := makeTask(userID, 0, modernTaskQuota, 0, BillingSourceWallet, 0)
-	modernTask.TaskID = "modern_timeout_with_refund"
+	modernTask.TaskID = "modern_timeout_without_assuming_refund"
 	modernTask.Progress = "50%"
 	modernTask.SubmitTime = 1771718400 // 2026-02-22 00:00:00 UTC
-	require.NoError(t, model.DB.Create(modernTask).Error)
+	seedAcceptedWalletTask(t, modernTask)
 
 	previousTimeout := constant.TaskTimeoutMinutes
 	constant.TaskTimeoutMinutes = 1
@@ -767,12 +771,12 @@ func TestSweepTimedOutTasksHonorsRefundRolloutBoundary(t *testing.T) {
 	require.NoError(t, model.DB.First(&reloadedModern, modernTask.ID).Error)
 	assert.EqualValues(t, model.TaskStatusFailure, reloadedLegacy.Status)
 	assert.EqualValues(t, model.TaskStatusFailure, reloadedModern.Status)
-	assert.Zero(t, reloadedLegacy.Quota)
-	assert.Zero(t, reloadedModern.Quota)
+	assert.Equal(t, legacyTaskQuota, reloadedLegacy.Quota)
+	assert.Equal(t, modernTaskQuota, reloadedModern.Quota)
 	assert.Contains(t, reloadedLegacy.FailReason, "old system")
 	assert.Equal(t, "Task timed out", reloadedModern.FailReason)
-	assert.Equal(t, initialQuota+modernTaskQuota, getUserQuota(t, userID))
-	assert.Equal(t, int64(1), countLogs(t))
+	assert.Equal(t, initialQuota, getUserQuota(t, userID), "a timeout does not prove the provider did not charge")
+	assert.Equal(t, int64(0), countLogs(t))
 }
 
 type scriptedPollingAdaptor struct {
@@ -845,10 +849,10 @@ func TestUpdateVideoSingleTaskPollClassification(t *testing.T) {
 		wantUnchanged bool
 	}{
 		{
-			name:          "404 fails immediately and refunds",
+			name:          "404 stops polling but preserves unknown payment",
 			statusCode:    http.StatusNotFound,
 			wantStatus:    model.TaskStatusFailure,
-			wantRefund:    true,
+			wantRefund:    false,
 			wantReason:    "Upstream task not found",
 			wantUnchanged: false,
 		},
@@ -860,13 +864,13 @@ func TestUpdateVideoSingleTaskPollClassification(t *testing.T) {
 			wantUnchanged: true,
 		},
 		{
-			name:          "429 reaches threshold and refunds",
+			name:          "429 threshold preserves unknown payment",
 			statusCode:    http.StatusTooManyRequests,
 			priorFailures: 2,
 			maxFailures:   3,
 			wantStatus:    model.TaskStatusFailure,
 			wantFailures:  3,
-			wantRefund:    true,
+			wantRefund:    false,
 			wantReason:    "Failed to query the upstream task status",
 		},
 		{
@@ -922,6 +926,7 @@ func TestUpdateVideoSingleTaskPollClassification(t *testing.T) {
 			seedUser(t, userID, initialQuota)
 			seedToken(t, tokenID, userID, "sk-poll-class", tokenRemain)
 			ch := &model.Channel{Id: channelID, Type: constant.ChannelTypeKling, Name: "poll", Key: "sk-test", Status: common.ChannelStatusEnabled}
+			require.NoError(t, model.DB.Create(ch).Error)
 
 			if testCase.maxFailures > 0 {
 				previous := constant.TaskPollMaxFailures
@@ -936,7 +941,8 @@ func TestUpdateVideoSingleTaskPollClassification(t *testing.T) {
 			if testCase.priorState != "" {
 				task.PrivateData.PluginState = []byte(testCase.priorState)
 			}
-			require.NoError(t, model.DB.Create(task).Error)
+			seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
+			seedAcceptedWalletTask(t, task)
 
 			adaptor := &scriptedPollingAdaptor{statusCode: testCase.statusCode, fetchErr: testCase.fetchErr, parse: testCase.parse, parseErr: testCase.parseErr}
 			require.NoError(t, updateVideoSingleTask(context.Background(), adaptor, ch, task.GetUpstreamTaskID(), map[string]*model.Task{
@@ -966,6 +972,8 @@ func TestUpdateVideoSingleTaskPollClassification(t *testing.T) {
 			} else {
 				assert.Equal(t, initialQuota, getUserQuota(t, userID))
 				assert.Equal(t, tokenRemain, getTokenRemainQuota(t, tokenID))
+				assert.Equal(t, preConsumed, persisted.Quota)
+				assert.Zero(t, countLogs(t))
 			}
 		})
 	}
@@ -982,10 +990,10 @@ func TestUpdateBatchTasksPollClassification(t *testing.T) {
 		wantReason   string
 	}{
 		{
-			name:       "404 fails the batch and refunds",
+			name:       "404 stops the batch but preserves unknown payment",
 			statusCode: http.StatusNotFound,
 			wantStatus: model.TaskStatusFailure,
-			wantRefund: true,
+			wantRefund: false,
 			wantReason: "Upstream task not found",
 		},
 		{
@@ -1014,7 +1022,8 @@ func TestUpdateBatchTasksPollClassification(t *testing.T) {
 			task := makeTask(userID, channelID, preConsumed, tokenID, BillingSourceWallet, 0)
 			task.TaskID = "task_batch_class"
 			task.PrivateData.UpstreamTaskID = "upstream_batch_class"
-			require.NoError(t, model.DB.Create(task).Error)
+			seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
+			seedAcceptedWalletTask(t, task)
 			upstreamID := task.GetUpstreamTaskID()
 
 			adaptor := &scriptedBatchPollingAdaptor{
@@ -1040,6 +1049,9 @@ func TestUpdateBatchTasksPollClassification(t *testing.T) {
 				assert.Zero(t, persisted.Quota)
 			} else {
 				assert.Equal(t, initialQuota, getUserQuota(t, userID))
+				assert.Equal(t, tokenRemain, getTokenRemainQuota(t, tokenID))
+				assert.Equal(t, preConsumed, persisted.Quota)
+				assert.Zero(t, countLogs(t))
 			}
 		})
 	}

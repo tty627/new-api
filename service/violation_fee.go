@@ -122,8 +122,12 @@ func ChargeViolationFeeIfNeeded(ctx *gin.Context, relayInfo *relaycommon.RelayIn
 		return false
 	}
 
-	if err := PostConsumeQuota(relayInfo, feeQuota, 0, true); err != nil {
+	applied, err := chargeDurableViolationFee(relayInfo, feeQuota)
+	if err != nil {
 		logger.LogError(ctx, common.LogText("failed to charge violation fee: %s", err.Error()))
+		return false
+	}
+	if !applied {
 		return false
 	}
 

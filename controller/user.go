@@ -1305,7 +1305,7 @@ func TopUp(c *gin.Context) {
 	if err != nil {
 		// 不向用户暴露兑换失败的细分原因，避免攻击者根据错误类型判断兑换码状态。
 		common.ApiErrorT(c, "Redemption failed, please try again later")
-		logger.LogError(c, common.LogText("failed to redeem key %s for user %d: %s", req.Key, id, err.Error()))
+		logger.LogError(c, common.LogText("failed to redeem key for user %d: %s", id, err.Error()))
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{

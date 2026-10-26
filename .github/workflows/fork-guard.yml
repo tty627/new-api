@@ -73,7 +73,9 @@ jobs:
     env:
       GOWORK: 'off'
       TEST_POSTGRES_DSN: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
-      TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mysql
+      TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mysql?parseTime=true
+      TEST_BILLING_POSTGRES_DSN: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
+      TEST_BILLING_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mysql?parseTime=true
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -87,6 +89,62 @@ jobs:
         run: go test ./common/ -run Fork -count=1
       - name: Contract tests (SQLite, PostgreSQL, MySQL)
         run: go test ./test/contract/ -count=1 -v
+      - name: Durable billing and subscription cycles (SQLite, PostgreSQL, MySQL)
+        run: |
+          go test ./model -run '^TestSubscriptionCycle' -count=1 -v -timeout 300s
+          go test ./service -run '^TestBillingRecovery' -count=1 -v -timeout 300s
+      - name: Real controller billing policy and immediate task settlement
+        run: |
+          go test ./controller -run '^TestPreConsumePolicyDatabaseMatrix$' -count=1 -v -timeout 180s
+          for dialect in sqlite mysql postgres; do
+            TEST_TASK_DB_DIALECT="$dialect" go test ./controller -run '^TestImmediateTaskSettlementDatabase$' -count=1 -v -timeout 180s
+          done
+      - name: MySQL clientFoundRows duplicate-request semantics
+        env:
+          TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mysql?parseTime=true&clientFoundRows=true
+          TEST_BILLING_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mysql?parseTime=true&clientFoundRows=true
+          TEST_POSTGRES_DSN: ''
+          TEST_BILLING_POSTGRES_DSN: ''
+        run: |
+          go test ./model -run '^TestSubscriptionCycle' -count=1 -v -timeout 300s
+          go test ./service -run '^TestBillingRecovery' -count=1 -v -timeout 300s
+
+  release-image:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      IMAGE_TAG: new-api-fork:fork-v0.2.0-${{ github.sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - name: Build actual frontend and release container
+        run: docker build --tag "$IMAGE_TAG" .
+      - name: Run isolated container and check embedded frontend
+        run: |
+          mkdir -p /tmp/fork-release
+          docker run -d --name fork-release-check -p 127.0.0.1:39300:3000 -e BATCH_UPDATE_ENABLED=false -e ENABLE_PPROF=false "$IMAGE_TAG"
+          trap 'docker logs fork-release-check; docker rm -f fork-release-check' EXIT
+          ready=false
+          for attempt in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:39300/api/status > /tmp/fork-release/status.json; then ready=true; break; fi
+            sleep 1
+          done
+          "$ready"
+          curl -fsS http://127.0.0.1:39300/ > /tmp/fork-release/index.html
+          test "$(wc -c < /tmp/fork-release/index.html)" -gt 1000
+          grep -q 'fork-v' /tmp/fork-release/status.json
+          docker exec fork-release-check /new-api billing-recovery --limit 10 > /tmp/fork-release/billing-recovery.json
+          docker image inspect "$IMAGE_TAG" --format '{"id":"{{.Id}}","os":"{{.Os}}","architecture":"{{.Architecture}}"}' > /tmp/fork-release/image-metadata.json
+          printf '%s\n' "$IMAGE_TAG" > /tmp/fork-release/image-tag.txt
+          git rev-parse HEAD > /tmp/fork-release/build-commit.txt
+          git rev-parse HEAD^{tree} > /tmp/fork-release/build-tree.txt
+          docker save "$IMAGE_TAG" | gzip -n > /tmp/fork-release/new-api-fork-image.tar.gz
+          (cd /tmp/fork-release && sha256sum new-api-fork-image.tar.gz > SHA256SUMS)
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: fork-release-${{ github.sha }}
+          path: /tmp/fork-release/
+          retention-days: 14
 
   # FORK-04: fresh install, upgrade from upstream, restart, upstream on fork DB.
   migration-matrix:

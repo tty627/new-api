@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -53,6 +54,9 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "link-backfill" { // fork: LINK-03
 		os.Exit(runLinkBackfill(os.Args[2:], os.Stdout, os.Stderr))
+	}
+	if len(os.Args) > 1 && os.Args[1] == "billing-recovery" { // fork: BILL-04/BILL-05
+		os.Exit(runBillingRecovery(os.Args[2:], os.Stdout, os.Stderr))
 	}
 	startTime := time.Now()
 	kitutil.SetLogging(common.SysLog, func(message string) {
@@ -137,6 +141,8 @@ func main() {
 
 	// Subscription quota reset task (daily/weekly/monthly/custom)
 	service.StartSubscriptionQuotaResetTask()
+	stopBillingRecovery := startForkBillingRecovery() // fork: persisted intents only
+	defer stopBillingRecovery()
 
 	// Report this process as a system instance so the System Info page can show
 	// all currently alive nodes in multi-instance deployments.
@@ -169,7 +175,7 @@ func main() {
 
 	if os.Getenv("ENABLE_PPROF") == "true" {
 		gopool.Go(func() {
-			log.Println(http.ListenAndServe("0.0.0.0:8005", nil))
+			log.Println(http.ListenAndServe("127.0.0.1:8005", nil)) // fork: diagnostic endpoint stays local
 		})
 		go common.Monitor()
 		common.SysLog(common.LogText("pprof enabled"))
@@ -215,7 +221,7 @@ func main() {
 	}
 
 	srv := &http.Server{
-		Addr:    ":" + port,
+		Addr:    net.JoinHostPort(os.Getenv("BIND_HOST"), port), // fork: isolated local acceptance
 		Handler: server,
 	}
 
@@ -303,6 +309,9 @@ func InitResources() error {
 
 	// 加载环境变量
 	common.InitEnv()
+	if err := validateForkRuntimeConfig(); err != nil { // fork: durable billing cannot share legacy queued balances
+		return err
+	}
 
 	logger.SetupLogger()
 

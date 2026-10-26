@@ -89,16 +89,6 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 	if relayInfo.UsePrice {
 		return nil
 	}
-	userQuota, err := model.GetUserQuota(relayInfo.UserId, false)
-	if err != nil {
-		return err
-	}
-
-	token, err := model.GetTokenByKey(strings.TrimPrefix(relayInfo.TokenKey, "sk-"), false)
-	if err != nil {
-		return err
-	}
-
 	modelName := relayInfo.OriginModelName
 	textInputTokens := usage.InputTokenDetails.TextTokens
 	textOutTokens := usage.OutputTokenDetails.TextTokens
@@ -137,6 +127,17 @@ func PreWssConsumeQuota(ctx *gin.Context, relayInfo *relaycommon.RelayInfo, usag
 
 	quota, clamp := calculateAudioQuota(quotaInfo)
 	noteQuotaClamp(relayInfo, clamp)
+	if session, ok := relayInfo.Billing.(*BillingSession); ok && session.durableRequestID != "" {
+		return session.reserveRealtimeQuota(quota)
+	}
+	userQuota, err := model.GetUserQuota(relayInfo.UserId, true)
+	if err != nil {
+		return err
+	}
+	token, err := model.GetTokenByKey(strings.TrimPrefix(relayInfo.TokenKey, "sk-"), false)
+	if err != nil {
+		return err
+	}
 
 	if userQuota < quota {
 		return fmt.Errorf("user quota is not enough, user quota: %s, need quota: %s", logger.FormatQuota(userQuota), logger.FormatQuota(quota))
@@ -436,19 +437,16 @@ func PostConsumeQuota(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQu
 }
 
 func postConsumeQuotaWithResult(relayInfo *relaycommon.RelayInfo, quota int, preConsumedQuota int, sendEmail bool) (result postConsumeQuotaResult, err error) {
+	if session, ok := relayInfo.Billing.(*BillingSession); ok && session.durableRequestID != "" {
+		return result, model.ErrBillingIntentConflict
+	}
 
 	// 1) Consume from wallet quota OR subscription item
 	if relayInfo != nil && relayInfo.BillingSource == BillingSourceSubscription {
 		if relayInfo.SubscriptionId == 0 {
 			return result, errors.New("subscription id is missing")
 		}
-		delta := int64(quota)
-		if delta != 0 {
-			if err := model.PostConsumeUserSubscriptionDelta(relayInfo.SubscriptionId, delta); err != nil {
-				return result, err
-			}
-			relayInfo.SubscriptionPostDelta += delta
-		}
+		return result, model.ErrBillingOutcomeUnknown
 	} else {
 		// Wallet
 		if quota > 0 {

@@ -21,6 +21,9 @@ func DecideRelayRetry(c *gin.Context, err *types.NewAPIError, retryTimes int) Po
 	if err == nil {
 		return PolicyDecision{Action: "stop", Reason: "request_completed", Source: "system"}
 	}
+	if BillingFailureOutcomeUnknown(err) { // fork: another upstream attempt could repeat an accepted operation
+		return PolicyDecision{Action: "stop", Reason: "upstream_outcome_unknown", Source: "system"}
+	}
 	if ShouldSkipRetryAfterChannelAffinityFailure(c) {
 		source := RequestPolicy(c).SessionModeSource
 		if source == "" {

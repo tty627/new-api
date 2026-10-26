@@ -203,6 +203,8 @@ func TestDecideRelayRetryReasons(t *testing.T) {
 		setup   func(*gin.Context)
 		want    PolicyDecision
 	}{
+		{name: "unknown transport result does not retry", err: types.NewErrorWithStatusCode(errors.New("connection reset after send"), types.ErrorCodeDoRequestFailed, http.StatusBadGateway), retries: 3, want: PolicyDecision{Action: "stop", Reason: "upstream_outcome_unknown", Source: "system"}},
+		{name: "unreadable upstream result does not retry", err: types.NewErrorWithStatusCode(io.ErrUnexpectedEOF, types.ErrorCodeReadResponseBodyFailed, http.StatusBadGateway), retries: 3, want: PolicyDecision{Action: "stop", Reason: "upstream_outcome_unknown", Source: "system"}},
 		{name: "retry status matched", err: upstream(http.StatusTooManyRequests), retries: 1, want: PolicyDecision{Action: "retry", Reason: "retry_status_matched", Source: "global"}},
 		{name: "status outside retry rules", err: upstream(http.StatusBadRequest), retries: 1, want: PolicyDecision{Action: "stop", Reason: "status_not_retryable", Source: "global"}},
 		{name: "attempt budget exhausted", err: upstream(http.StatusTooManyRequests), retries: 0, want: PolicyDecision{Action: "stop", Reason: "attempt_budget_exhausted", Source: "global"}},

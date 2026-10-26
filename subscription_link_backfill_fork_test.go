@@ -57,3 +57,18 @@ func TestLinkBackfillRejectsInvalidArgumentsBeforeOpeningDatabase(t *testing.T) 
 		assert.NotEmpty(t, stderr.String())
 	}
 }
+
+func TestBillingRecoveryRejectsBatchBeforeOpeningDatabase(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	path := filepath.Join(dir, "must-not-create.db")
+	t.Setenv("SQL_DSN", "local")
+	t.Setenv("SQLITE_PATH", path)
+	t.Setenv("BATCH_UPDATE_ENABLED", "true")
+	var stdout, stderr bytes.Buffer
+	require.Equal(t, 2, runBillingRecovery([]string{"--retry"}, &stdout, &stderr))
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), "drain legacy queued writes")
+	_, err := os.Stat(path)
+	assert.True(t, os.IsNotExist(err), "an incompatible runtime configuration must fail before opening or migrating a database")
+}
