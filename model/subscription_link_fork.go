@@ -5,11 +5,14 @@ package model
 // PATCHES.md for the exact call sites.
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
+	"github.com/glebarez/sqlite"
 	"gorm.io/gorm"
 )
 
@@ -111,7 +114,7 @@ func forkInsertOrderWithSnapshot(o *SubscriptionOrder) error {
 }
 
 func insertOrderLinkTx(tx *gorm.DB, o *SubscriptionOrder, snap subscriptionPlanSnapshot, source string) error {
-	data, err := json.Marshal(snap)
+	data, err := common.Marshal(snap)
 	if err != nil {
 		return err
 	}
@@ -137,7 +140,7 @@ func forkPlanForOrderTx(tx *gorm.DB, order *SubscriptionOrder, current *Subscrip
 		return current, nil
 	}
 	var snap subscriptionPlanSnapshot
-	if err := json.Unmarshal([]byte(link.Snapshot), &snap); err != nil {
+	if err := common.Unmarshal([]byte(link.Snapshot), &snap); err != nil {
 		return nil, fmt.Errorf("decode subscription snapshot for order %d: %w", order.Id, err)
 	}
 	return snap.applyTo(current), nil
@@ -172,7 +175,7 @@ func forkLinkOrderTx(tx *gorm.DB, order *SubscriptionOrder, plan *SubscriptionPl
 	if existing > 0 {
 		return fmt.Errorf("fork link: order %d is already linked", order.Id)
 	}
-	data, err := json.Marshal(snapshotFromPlan(plan))
+	data, err := common.Marshal(snapshotFromPlan(plan))
 	if err != nil {
 		return err
 	}
@@ -251,13 +254,59 @@ type BackfillDecision struct {
 	Reason             string `json:"reason,omitempty"`
 }
 
+// InitSubscriptionLinkBackfillDB opens an existing database without running
+// server startup migrations or initialization. A dry run also opens SQLite in
+// read-only mode, without the server's journal-mode or immediate-lock pragmas.
+func InitSubscriptionLinkBackfillDB(apply bool) error {
+	var db *gorm.DB
+	var kind common.DatabaseType
+	var err error
+	dsn := os.Getenv("SQL_DSN")
+	if dsn == "" || strings.HasPrefix(dsn, "local") {
+		path, rawQuery, _ := strings.Cut(common.SQLitePath, "?")
+		params, parseErr := url.ParseQuery(rawQuery)
+		if parseErr != nil {
+			return fmt.Errorf("invalid SQLite connection parameters: %w", parseErr)
+		}
+		if apply {
+			params.Set("mode", "rw")
+		} else {
+			params = url.Values{"mode": {"ro"}, "_pragma": {"query_only(1)", "busy_timeout(30000)"}}
+		}
+		if !strings.HasPrefix(path, "file:") {
+			path = "file:" + strings.ReplaceAll(path, "\\", "/")
+		}
+		db, err = gorm.Open(sqlite.Open(path+"?"+params.Encode()), newGormConfig(false))
+		kind = common.DatabaseTypeSQLite
+	} else {
+		db, kind, err = chooseDB("SQL_DSN", false)
+	}
+	if err != nil {
+		return err
+	}
+	for _, table := range []any{&SubscriptionOrder{}, &UserSubscription{}, &ForkSubscriptionOrderLink{}} {
+		if !db.Migrator().HasTable(table) {
+			if sqlDB, closeErr := db.DB(); closeErr == nil {
+				_ = sqlDB.Close()
+			}
+			return errors.New("backfill requires an existing database with the fork migration applied")
+		}
+	}
+	DB = db
+	common.SetMainDatabaseType(kind)
+	initCol()
+	return nil
+}
+
 // PlanSubscriptionLinkBackfill decides, without writing, which completed but
 // unlinked orders can be proven to own exactly one subscription (LINK-03).
-// Per (user, plan): unlinked successful orders and unlinked order/balance
-// subscriptions must be equal in number, and pairing them in time order must
-// keep every |subscription.start_time - order.complete_time| <= window.
-// Anything else marks the whole group unlinkable; nothing is guessed.
+// Only a single unlinked successful order and a single Source=order subscription
+// for the same user and plan can be matched, within the configured time window.
+// Multiple purchases remain unlinkable: chronological sorting is not proof.
 func PlanSubscriptionLinkBackfill(windowSeconds int64) ([]BackfillDecision, error) {
+	if windowSeconds < 0 {
+		return nil, errors.New("backfill window must not be negative")
+	}
 	var orders []SubscriptionOrder
 	err := DB.Where("status = ? AND id NOT IN (?)", common.TopUpStatusSuccess,
 		DB.Model(&ForkSubscriptionOrderLink{}).Select("order_id").Where("user_subscription_id IS NOT NULL OR link_source = ?", LinkSourceUnlinkable)).
@@ -266,7 +315,7 @@ func PlanSubscriptionLinkBackfill(windowSeconds int64) ([]BackfillDecision, erro
 		return nil, err
 	}
 	var subs []UserSubscription
-	err = DB.Where("source IN ? AND id NOT IN (?)", []string{"order", PaymentMethodBalance},
+	err = DB.Where("source = ? AND id NOT IN (?)", "order",
 		DB.Model(&ForkSubscriptionOrderLink{}).Select("user_subscription_id").Where("user_subscription_id IS NOT NULL")).
 		Order("user_id, plan_id, start_time, id").Find(&subs).Error
 	if err != nil {
@@ -290,14 +339,11 @@ func PlanSubscriptionLinkBackfill(windowSeconds int64) ([]BackfillDecision, erro
 	for _, k := range keys {
 		group, candidates := ordersByKey[k], subsByKey[k]
 		reason := ""
-		if len(group) != len(candidates) {
+		if len(group) != 1 || len(candidates) != 1 {
 			reason = fmt.Sprintf("%d orders vs %d subscriptions", len(group), len(candidates))
 		} else {
-			for i := range group {
-				if d := candidates[i].StartTime - group[i].CompleteTime; d > windowSeconds || d < -windowSeconds {
-					reason = fmt.Sprintf("order %d and subscription %d are %ds apart", group[i].Id, candidates[i].Id, d)
-					break
-				}
+			if d := candidates[0].StartTime - group[0].CompleteTime; d > windowSeconds || d < -windowSeconds {
+				reason = fmt.Sprintf("order %d and subscription %d are %ds apart", group[0].Id, candidates[0].Id, d)
 			}
 		}
 		for i, o := range group {

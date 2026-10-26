@@ -2,6 +2,7 @@ package model
 
 import (
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/QuantumNous/new-api/common"
@@ -256,17 +257,25 @@ func TestLink03_AmbiguousGroupsAreUnlinkable(t *testing.T) {
 	// One order and one subscription, but too far apart in time.
 	far := linkTestUser(t, "link03far")
 	createLegacyCompleted(t, far, plan, "LINK03FAR", 1_700_000_000, 1_700_009_000)
+	// Equal counts and identical timestamps still do not identify the pairs.
+	equal := linkTestUser(t, "link03equal")
+	createLegacyCompleted(t, equal, plan, "LINK03E1", 1_700_000_000, 1_700_000_001)
+	createLegacyCompleted(t, equal, plan, "LINK03E2", 1_700_000_000, 1_700_000_001)
+	// A legacy balance grant is not Source=order evidence for an external order.
+	balance := linkTestUser(t, "link03balance")
+	_, balanceSub := createLegacyCompleted(t, balance, plan, "LINK03BAL", 1_700_000_000, 1_700_000_001)
+	require.NoError(t, DB.Model(balanceSub).Update("source", PaymentMethodBalance).Error)
 
 	decisions, err := PlanSubscriptionLinkBackfill(300)
 	require.NoError(t, err)
-	require.Len(t, decisions, 4)
+	require.Len(t, decisions, 7)
 	for _, d := range decisions {
 		assert.Equal(t, LinkSourceUnlinkable, d.Result, d.TradeNo)
 		assert.NotEmpty(t, d.Reason)
 		assert.Zero(t, d.UserSubscriptionId)
 	}
 	require.NoError(t, ApplySubscriptionLinkBackfill(decisions))
-	for _, tn := range []string{"LINK03M1", "LINK03M2", "LINK03M3", "LINK03FAR"} {
+	for _, tn := range []string{"LINK03M1", "LINK03M2", "LINK03M3", "LINK03FAR", "LINK03E1", "LINK03E2", "LINK03BAL"} {
 		status, err := GetSubscriptionLinkStatus(tn)
 		require.NoError(t, err)
 		assert.Equal(t, LinkStatusUnlinkable, status.Status, tn)
@@ -274,6 +283,49 @@ func TestLink03_AmbiguousGroupsAreUnlinkable(t *testing.T) {
 	again, err := PlanSubscriptionLinkBackfill(300)
 	require.NoError(t, err)
 	assert.Empty(t, again, "unlinkable orders are not re-planned")
+}
+
+func TestLink03_DryRunConnectionDoesNotInitializeDatabase(t *testing.T) {
+	path := t.TempDir() + "/legacy.db"
+	db, err := gorm.Open(sqlite.Open(path), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, db.AutoMigrate(&SubscriptionOrder{}, &UserSubscription{}, &ForkSubscriptionOrderLink{}))
+	sqlDB, err := db.DB()
+	require.NoError(t, err)
+	require.NoError(t, sqlDB.Close())
+	before, err := os.ReadFile(path)
+	require.NoError(t, err)
+
+	previousDB, previousPath := DB, common.SQLitePath
+	previousMain, previousLog := common.MainDatabaseType(), common.LogDatabaseType()
+	t.Cleanup(func() {
+		DB, common.SQLitePath = previousDB, previousPath
+		common.SetDatabaseTypes(previousMain, previousLog)
+		initCol()
+	})
+	t.Setenv("SQL_DSN", "local")
+	common.SQLitePath = path + "?_pragma=journal_mode(WAL)&_txlock=immediate"
+	require.NoError(t, InitSubscriptionLinkBackfillDB(false))
+	readOnlyDB, err := DB.DB()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = readOnlyDB.Close() })
+	decisions, err := PlanSubscriptionLinkBackfill(300)
+	require.NoError(t, err)
+	assert.Empty(t, decisions)
+	assert.False(t, DB.Migrator().HasTable(&User{}), "dry run must not run the server migration")
+	assert.Error(t, DB.Create(&ForkSubscriptionOrderLink{OrderId: 1, TradeNo: "blocked", PlanId: 1, SnapshotSource: SnapshotSourceCurrentPlan}).Error,
+		"the dry-run connection must reject writes")
+	require.NoError(t, readOnlyDB.Close())
+	after, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, before, after, "dry run must preserve the database bytes")
+	_, err = PlanSubscriptionLinkBackfill(-1)
+	assert.ErrorContains(t, err, "must not be negative")
+
+	common.SQLitePath = t.TempDir() + "/missing.db"
+	assert.Error(t, InitSubscriptionLinkBackfillDB(false))
+	_, err = os.Stat(common.SQLitePath)
+	assert.ErrorIs(t, err, os.ErrNotExist, "dry run must not create a missing database")
 }
 
 // LINK-04: if an admin later deletes the linked subscription, the status says

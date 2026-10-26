@@ -2,16 +2,74 @@ package contract_test
 
 import (
 	"errors"
+	"net/url"
+	"os"
 	"sync"
 	"testing"
 
 	"github.com/Calcium-Ion/go-epay/epay"
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
+	"github.com/QuantumNous/new-api/setting/operation_setting"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+// This fixture is produced by the Python bridge's success_params function,
+// rather than by this package's Go signing helper. Ignore the first response
+// to model a lost acknowledgement, then replay the exact bridge payload.
+func TestDEP_BridgeGeneratedNotifyAfterLostResponse(t *testing.T) {
+	data, err := os.ReadFile("testdata/bridge_delivery.json")
+	require.NoError(t, err)
+	var fixture struct {
+		PID   string `json:"pid"`
+		Key   string `json:"key"`
+		Cases []struct {
+			BusinessKind string            `json:"business_kind"`
+			Params       map[string]string `json:"params"`
+		} `json:"cases"`
+	}
+	require.NoError(t, common.Unmarshal(data, &fixture))
+	require.Len(t, fixture.Cases, 2)
+	forEachDB(t, func(t *testing.T, db *gorm.DB) {
+		configureEpay(t)
+		operation_setting.EpayId, operation_setting.EpayKey = fixture.PID, fixture.Key
+		for _, sample := range fixture.Cases {
+			t.Run(sample.BusinessKind, func(t *testing.T) {
+				user := createUser(t, db, 0)
+				tradeNo := sample.Params["out_trade_no"]
+				require.Equal(t, "7.30", sample.Params["money"])
+				path := "/api/user/epay/notify"
+				if sample.BusinessKind == "subscription" {
+					plan := createPlan(t, db, 7.30)
+					createPendingSubscriptionOrder(t, db, user.Id, plan, tradeNo)
+					path = "/api/subscription/epay/notify"
+				} else {
+					require.Equal(t, "topup", sample.BusinessKind)
+					createPendingTopUp(t, db, user.Id, tradeNo, 10, 7.30)
+				}
+				form := url.Values{}
+				for key, value := range sample.Params {
+					form.Set(key, value)
+				}
+				router := callbackRouter()
+				postForm(router, path, form) // The bridge did not receive this response.
+				require.Equal(t, "success", postForm(router, path, form).Body.String())
+				if sample.BusinessKind == "subscription" {
+					assert.EqualValues(t, 1, countSubscriptions(t, db, user.Id))
+					assert.Equal(t, common.TopUpStatusSuccess, orderStatus(t, db, &model.SubscriptionOrder{}, tradeNo))
+					status, err := model.GetSubscriptionLinkStatus(tradeNo)
+					require.NoError(t, err)
+					assert.Equal(t, model.LinkStatusLinked, status.Status)
+				} else {
+					assert.Equal(t, int(10*common.QuotaPerUnit), userQuota(t, db, user.Id))
+					assert.Equal(t, common.TopUpStatusSuccess, orderStatus(t, db, &model.TopUp{}, tradeNo))
+				}
+			})
+		}
+	})
+}
 
 // DEP-01: a top-up notify whose settlement transaction fails must not answer
 // "success", so the bridge keeps retrying.
