@@ -551,7 +551,7 @@
   "failed to record log: %s": "记录日志失败: %s",
   "failed to record task billing log: %s": "记录任务计费日志失败: %s",
   "failed to record topup log: %s": "记录充值日志失败: %s",
-  "failed to redeem key %s for user %d: %s": "用户 %[2]d 使用兑换码 %[1]s 兑换失败: %[3]s",
+  "failed to redeem key for user %d: %s": "用户 %[1]d 兑换失败: %[2]s",
   "failed to refresh codex channel credential: %s": "刷新 Codex 渠道凭证失败: %s",
   "failed to refresh user group cache after %s for user %d: %v": "刷新用户 %[2]d 的分组缓存失败（操作: %[1]s）: %[3]v",
   "failed to refund Midjourney token quota, task %s: %s": "退还 Midjourney 令牌额度失败 task %s: %s",

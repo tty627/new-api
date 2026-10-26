@@ -296,16 +296,9 @@ func settleDurableTask(ctx context.Context, task *model.Task, actual int, refund
 	if task == nil || task.ID <= 0 {
 		return false, model.ErrBillingOutcomeUnknown
 	}
-	requestID := ""
-	if task.PrivateData.Execution != nil {
-		requestID = task.PrivateData.Execution.RequestID
-	}
-	if requestID == "" {
-		var err error
-		requestID, err = model.ImportLegacyWalletTask(ctx, task.ID)
-		if err != nil {
-			return false, err
-		}
+	requestID, err := billingTaskRequestID(ctx, task)
+	if err != nil {
+		return false, err
 	}
 	row, err := model.GetBillingSession(ctx, requestID)
 	if err != nil {
@@ -340,6 +333,12 @@ func billingTaskRequestID(ctx context.Context, task *model.Task) (string, error)
 		id := task.PrivateData.Execution.RequestID
 		row, err := model.GetBillingSession(ctx, id)
 		if err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				if task.Quota == 0 && task.PrivateData.BillingSource == "" && task.PrivateData.SubscriptionId == 0 {
+					return "", err
+				}
+				return model.ImportLegacyWalletTask(ctx, task.ID)
+			}
 			return "", err
 		}
 		if row.TaskID != task.ID {
@@ -391,9 +390,9 @@ func commitTerminalTaskBilling(ctx context.Context, adaptor TaskPollingAdaptor, 
 	if err != nil {
 		// Historical subscription cycles cannot be invented from a task snapshot.
 		hasRequest := task.PrivateData.Execution != nil && task.PrivateData.Execution.RequestID != ""
-		historicalSubscription := task.PrivateData.BillingSource == BillingSourceSubscription && !hasRequest
+		historicalUnknown := errors.Is(err, model.ErrBillingOutcomeUnknown) || (task.PrivateData.BillingSource == BillingSourceSubscription && !hasRequest)
 		freeTask := errors.Is(err, gorm.ErrRecordNotFound) && task.Quota == 0 && actual == 0 && task.PrivateData.BillingSource == "" && task.PrivateData.SubscriptionId == 0
-		if historicalSubscription || freeTask {
+		if historicalUnknown || freeTask {
 			return task.UpdateWithStatus(from)
 		}
 		return false, err

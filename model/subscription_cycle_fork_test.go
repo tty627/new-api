@@ -329,6 +329,72 @@ func TestSubscriptionCycleAtomicAndConcurrent(t *testing.T) {
 			assert.Zero(t, getSubscriptionResetSub(t, capSub.Id).AmountUsed)
 		}
 		require.NoError(t, PostConsumeUserSubscriptionDelta(capSub.Id, 0))
+		// Exercise both serialization orders with an actual competing reset
+		// and reservation transaction, not just a sequential cycle change.
+		for _, resetFirst := range []bool{false, true} {
+			t.Run(fmt.Sprintf("reset_reserve/reset_first_%t", resetFirst), func(t *testing.T) {
+				plan, sub := cycleFixture(t, SubscriptionResetNever)
+				request := fmt.Sprintf("reset-reserve-%t", resetFirst)
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				defer cancel()
+				tx := DB.WithContext(ctx).Begin()
+				require.NoError(t, tx.Error)
+				defer tx.Rollback()
+				if resetFirst {
+					_, err := adminResetUserSubscriptionsByPlanTx(tx, sub.UserId, plan, time.Now().Unix(), false)
+					require.NoError(t, err)
+				} else {
+					_, err := PreConsumeUserSubscriptionTx(tx, request, sub.UserId, "cycle-model", 0, 50)
+					require.NoError(t, err)
+				}
+				atSubscription := make(chan struct{})
+				var once sync.Once
+				callback := "cycle_reset_reserve_competition"
+				require.NoError(t, DB.Callback().Query().Before("gorm:query").Register(callback, func(query *gorm.DB) {
+					if query.Statement.Schema != nil && query.Statement.Schema.Name == "UserSubscription" {
+						once.Do(func() { close(atSubscription) })
+					}
+				}))
+				defer DB.Callback().Query().Remove(callback)
+				done := make(chan error, 1)
+				started := make(chan struct{})
+				go func() {
+					close(started)
+					done <- DB.WithContext(ctx).Transaction(func(competing *gorm.DB) error {
+						if resetFirst {
+							_, err := PreConsumeUserSubscriptionTx(competing, request, sub.UserId, "cycle-model", 0, 50)
+							return err
+						}
+						_, err := adminResetUserSubscriptionsByPlanTx(competing, sub.UserId, plan, time.Now().Unix(), false)
+						return err
+					})
+				}()
+				<-started
+				if DB.Dialector.Name() != "sqlite" {
+					select {
+					case <-atSubscription:
+					case <-ctx.Done():
+						t.Fatal("competing transaction did not reach the subscription lock")
+					}
+				}
+				require.NoError(t, tx.Commit().Error)
+				require.NoError(t, <-done)
+				stored := getSubscriptionResetSub(t, sub.Id)
+				var record SubscriptionPreConsumeRecord
+				require.NoError(t, DB.Where("request_id = ?", request).First(&record).Error)
+				require.NotNil(t, record.QuotaCycle)
+				assert.EqualValues(t, 1, stored.QuotaCycle)
+				if resetFirst {
+					assert.Equal(t, stored.QuotaCycle, *record.QuotaCycle)
+					assert.EqualValues(t, 50, stored.AmountUsed)
+				} else {
+					assert.EqualValues(t, 0, *record.QuotaCycle)
+					assert.Zero(t, stored.AmountUsed)
+				}
+				require.NoError(t, RefundSubscriptionPreConsume(request))
+				assert.Zero(t, getSubscriptionResetSub(t, sub.Id).AmountUsed)
+			})
+		}
 	})
 }
 

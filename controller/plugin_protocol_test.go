@@ -233,6 +233,9 @@ func TestServeTaskPluginProtocolDisconnectBeforeDurableBarrierPersistsAndSettles
 }
 
 func TestServeTaskPluginProtocolDisconnectDuringTerminalSettlementStopsOnlyObservation(t *testing.T) {
+	previousRedis, previousBatch := common.RedisEnabled, common.BatchUpdateEnabled
+	common.RedisEnabled, common.BatchUpdateEnabled = false, false
+	t.Cleanup(func() { common.RedisEnabled, common.BatchUpdateEnabled = previousRedis, previousBatch })
 	pinned := compilePluginProtocolTestEndpoint(t, "disconnect-terminal-settlement", `
 		export const protocols = {openai_responses: {
 			renderEvents: function() { return {events: [], done: false}; },
@@ -271,9 +274,16 @@ func TestServeTaskPluginProtocolDisconnectDuringTerminalSettlementStopsOnlyObser
 		Status:    model.TaskStatusSubmitted,
 		PrivateData: model.TaskPrivateData{
 			UpstreamTaskID: "upstream-terminal",
+			BillingSource:  "wallet",
+			Execution:      &model.TaskExecutionSnapshot{RequestID: "terminal-disconnect-billing"},
 		},
 	}
 	require.NoError(t, database.Create(&task).Error)
+	require.NoError(t, database.Create(&model.ForkBillingSession{
+		RequestID: "terminal-disconnect-billing", UserID: task.UserId, Playground: true,
+		FundingSource: "wallet", TaskID: task.ID, ReservedQuota: 10, TaskAccountedQuota: 10,
+		TaskAccepted: true, Status: model.BillingTaskActive, Revision: 1,
+	}).Error)
 
 	c, recorder := newPluginProtocolTestContext(true, true)
 	requestContext, cancel := context.WithCancel(c.Request.Context())

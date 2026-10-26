@@ -11,12 +11,12 @@ import (
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/constant"
 	"github.com/QuantumNous/new-api/controller"
-	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/middleware"
 	"github.com/QuantumNous/new-api/model"
 	"github.com/QuantumNous/new-api/pkg/jsplugin"
 	"github.com/QuantumNous/new-api/relay"
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
+	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/service"
 	"github.com/QuantumNous/new-api/setting/system_setting"
 	"github.com/gin-gonic/gin"
@@ -39,9 +39,15 @@ export function buildContentRequest(ctx){const item=(ctx.data.artifacts||[]).fin
 func TestDocumentPluginRunsGenericBatchArtifactChain(t *testing.T) {
 	service.InitHttpClient()
 	originalDB := model.DB
+	originalRedis, originalMemory, originalBatch := common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled
+	common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled = false, false, false
+	t.Cleanup(func() {
+		common.RedisEnabled, common.MemoryCacheEnabled, common.BatchUpdateEnabled = originalRedis, originalMemory, originalBatch
+	})
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&model.TaskPlugin{}, &model.Channel{}, &model.Task{}))
+	require.NoError(t, database.AutoMigrate(&model.User{}, &model.TaskPlugin{}, &model.Channel{}, &model.Task{}, &model.ForkBillingSession{}, &model.ForkBillingEvent{}))
+	require.NoError(t, database.Create(&model.User{Id: 7, Username: "document-plugin-user", Quota: 1000}).Error)
 	model.DB = database
 	t.Cleanup(func() { model.DB = originalDB; jsplugin.DefaultRegistry.Unregister("doc-parse") })
 

@@ -23,6 +23,7 @@ const (
 	BillingRefunded          = "refunded"
 	BillingTaskAcceptPending = "task_accept_pending"
 	BillingTaskActive        = "task_active"
+	BillingLegacyUnknown     = "legacy_unknown"
 )
 
 var (
@@ -45,6 +46,7 @@ type ForkBillingSession struct {
 	ModelName               string `json:"model_name" gorm:"type:varchar(255)"`
 	SubscriptionID          int    `json:"subscription_id"`
 	TaskID                  int64  `json:"task_id" gorm:"type:bigint;index"`
+	MidjourneyID            int    `json:"midjourney_id" gorm:"index"`
 	TaskAccountedQuota      int64  `json:"task_accounted_quota" gorm:"type:bigint"`
 	TaskAccepted            bool   `json:"task_accepted"`
 	QuotaSaturation         string `json:"quota_saturation,omitempty" gorm:"type:text"`
@@ -331,12 +333,13 @@ func setBillingClamp(row *ForkBillingSession, clamp *common.QuotaClamp) error {
 	return err
 }
 
-// ImportLegacyWalletTask records the already persisted wallet task liability.
-// An old subscription has no provable cycle and is intentionally not imported.
+// ImportLegacyWalletTask only records missing historical charge evidence. A
+// task's quota marker cannot establish that either wallet or token was debited.
+// The compatibility name is retained, but no funds or charge are imported.
 func ImportLegacyWalletTask(ctx context.Context, taskID int64) (string, error) {
 	requestID := fmt.Sprintf("legacy-task:%d", taskID)
 	err := DB.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		row := ForkBillingSession{RequestID: requestID, Status: BillingTaskActive, Revision: 1,
+		row := ForkBillingSession{RequestID: requestID, Status: BillingLegacyUnknown, Revision: 1, LastErrorCode: "legacy_charge_unproven",
 			CreatedAt: common.GetTimestamp(), UpdatedAt: common.GetTimestamp()}
 		insert := insertBillingSessionTx(tx, &row)
 		if insert.Error != nil {
@@ -349,24 +352,20 @@ func ImportLegacyWalletTask(ctx context.Context, taskID int64) (string, error) {
 		if err := lockForUpdate(tx).First(&task, taskID).Error; err != nil {
 			return err
 		}
-		if task.PrivateData.Execution != nil && task.PrivateData.Execution.RequestID != "" {
-			return ErrBillingOutcomeUnknown
-		}
-		if task.PrivateData.BillingSource == "subscription" || task.PrivateData.SubscriptionId != 0 {
-			return ErrBillingOutcomeUnknown
-		}
-		if err := validateBillingQuota(task.Quota); err != nil {
-			return err
-		}
 		row.UserID, row.TokenID, row.Playground = task.UserId, task.PrivateData.TokenId, task.PrivateData.TokenId == 0
-		row.FundingSource, row.TaskID, row.TaskAccepted = "wallet", taskID, true
-		row.ReservedQuota, row.TaskAccountedQuota = int64(task.Quota), int64(task.Quota)
+		row.FundingSource, row.SubscriptionID, row.TaskID = task.PrivateData.BillingSource, task.PrivateData.SubscriptionId, taskID
+		if row.FundingSource == "" {
+			row.FundingSource = "wallet"
+		}
 		if err := tx.Save(&row).Error; err != nil {
 			return err
 		}
-		return billingEventTx(tx, &row, "legacy_task_imported", "")
+		return billingEventTx(tx, &row, "legacy_charge_unproven", row.LastErrorCode)
 	})
-	return requestID, err
+	if err != nil {
+		return requestID, err
+	}
+	return requestID, ErrBillingOutcomeUnknown
 }
 
 // ResizeBillingSession uses an absolute reservation target, so a repeated or
@@ -556,6 +555,11 @@ func ApplyBillingIntentOnce(ctx context.Context, requestID string) (bool, error)
 			return ErrBillingIntentConflict
 		}
 		var task Task
+		var midjourney Midjourney
+		billingChannelID := 0
+		if row.TaskID > 0 && row.MidjourneyID > 0 {
+			return ErrBillingIntentConflict
+		}
 		if row.TaskID > 0 {
 			if err := lockForUpdate(tx).First(&task, row.TaskID).Error; err != nil {
 				return err
@@ -563,6 +567,15 @@ func ApplyBillingIntentOnce(ctx context.Context, requestID string) (bool, error)
 			if task.UserId != row.UserID || task.PrivateData.TokenId != row.TokenID {
 				return ErrBillingIntentConflict
 			}
+			billingChannelID = task.ChannelId
+		} else if row.MidjourneyID > 0 {
+			if err := lockForUpdate(tx).First(&midjourney, row.MidjourneyID).Error; err != nil {
+				return err
+			}
+			if midjourney.UserId != row.UserID || midjourney.TokenId != row.TokenID || midjourney.BillingRequestID != row.RequestID {
+				return ErrBillingIntentConflict
+			}
+			billingChannelID = midjourney.GetBillingChannelId()
 		}
 		user, token, err := lockBillingAccounts(tx, &row, true)
 		if err != nil {
@@ -587,20 +600,24 @@ func ApplyBillingIntentOnce(ctx context.Context, requestID string) (bool, error)
 		if err := applyBillingTokenTx(tx, token, delta, false); err != nil {
 			return err
 		}
-		if row.TaskID > 0 {
-			if err := tx.Model(&Task{}).Where("id = ?", row.TaskID).Update("quota", *row.ActualQuota).Error; err != nil {
+		if row.TaskID > 0 || row.MidjourneyID > 0 {
+			target := tx.Model(&Task{}).Where("id = ?", row.TaskID)
+			if row.MidjourneyID > 0 {
+				target = tx.Model(&Midjourney{}).Where("id = ?", row.MidjourneyID)
+			}
+			if err := target.Update("quota", *row.ActualQuota).Error; err != nil {
 				return err
 			}
 			statDelta := *row.ActualQuota - row.TaskAccountedQuota
 			stats := map[string]any{"used_quota": gorm.Expr("used_quota + ?", statDelta)}
-			if !row.TaskAccepted {
+			if !row.TaskAccepted && row.Status != BillingRefundPending {
 				stats["request_count"] = gorm.Expr("request_count + 1")
 			}
 			{
 				if err := tx.Unscoped().Model(&User{}).Where("id = ?", row.UserID).Updates(stats).Error; err != nil {
 					return err
 				}
-				if err := tx.Model(&Channel{}).Where("id = ?", task.ChannelId).Update("used_quota", gorm.Expr("used_quota + ?", statDelta)).Error; err != nil {
+				if err := tx.Model(&Channel{}).Where("id = ?", billingChannelID).Update("used_quota", gorm.Expr("used_quota + ?", statDelta)).Error; err != nil {
 					return err
 				}
 			}
@@ -681,7 +698,7 @@ func ListUnresolvedBillingSessions(ctx context.Context, limit int) ([]ForkBillin
 		limit = 100
 	}
 	var rows []ForkBillingSession
-	err := DB.WithContext(ctx).Where("status IN ? OR cache_pending = ?", []string{BillingReserved, BillingSettlePending, BillingRefundPending, BillingTaskAcceptPending, BillingTaskActive}, true).
+	err := DB.WithContext(ctx).Where("status IN ? OR cache_pending = ?", []string{BillingReserved, BillingSettlePending, BillingRefundPending, BillingTaskAcceptPending, BillingTaskActive, BillingLegacyUnknown}, true).
 		Order("created_at asc, request_id asc").Limit(limit).Find(&rows).Error
 	return rows, err
 }

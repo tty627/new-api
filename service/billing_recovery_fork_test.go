@@ -202,7 +202,7 @@ func forEachBillingRecoveryDB(t *testing.T, fn func(*testing.T, *gorm.DB)) {
 			oldMain, oldLogType := common.MainDatabaseType(), common.LogDatabaseType()
 			model.DB, model.LOG_DB, common.RedisEnabled, common.BatchUpdateEnabled = db, db, false, false
 			common.SetDatabaseTypes(kind, kind)
-			tables := []any{&model.ForkBillingEvent{}, &model.ForkBillingSession{}, &model.SubscriptionPreConsumeRecord{}, &model.UserSubscription{}, &model.SubscriptionPlan{}, &model.Task{}, &model.Token{}, &model.User{}, &model.Channel{}}
+			tables := []any{&model.ForkBillingEvent{}, &model.ForkBillingSession{}, &model.SubscriptionPreConsumeRecord{}, &model.UserSubscription{}, &model.SubscriptionPlan{}, &model.Task{}, &model.Midjourney{}, &model.Log{}, &model.Token{}, &model.User{}, &model.Channel{}}
 			t.Cleanup(func() {
 				assert.NoError(t, db.Migrator().DropTable(tables...))
 				assert.NoError(t, sqlDB.Close())
@@ -565,4 +565,298 @@ func TestBillingRecoveryCacheRepairAndFactoryClaim(t *testing.T) {
 	require.NoError(t, RecoverBillingSession(ctx, row.RequestID))
 	require.NoError(t, db.Unscoped().First(&token, 1).Error)
 	assert.Equal(t, 1000, token.RemainQuota)
+}
+
+func TestBillingRecoveryMidjourneyMatrix(t *testing.T) {
+	forEachBillingRecoveryDB(t, func(t *testing.T, db *gorm.DB) {
+		ctx := context.Background()
+		cases := []string{"accepted", "code21", "queued22", "immediate_success", "free_inpaint", "free_zoom", "reject", "http_unknown", "transport_unknown", "local_failure", "empty_identity", "insert_failure", "reserve_token_failure", "refund_token_failure", "terminal_intent_failure", "timeout_unknown", "deleted_token", "legacy_unknown", "balance_race", "accept_poll_race"}
+		for _, scenario := range cases {
+			t.Run(scenario, func(t *testing.T) {
+				for _, table := range []any{&model.ForkBillingEvent{}, &model.ForkBillingSession{}, &model.Midjourney{}, &model.Token{}, &model.User{}, &model.Channel{}} {
+					require.NoError(t, db.Session(&gorm.Session{AllowGlobalUpdate: true}).Unscoped().Delete(table).Error)
+				}
+				seedUser(t, 1, 1000)
+				seedToken(t, 1, 1, "mj-matrix-key", 1000)
+				seedChannel(t, 1)
+				seedChannel(t, 2)
+				newInfo := func(id string) *relaycommon.RelayInfo {
+					return &relaycommon.RelayInfo{RequestId: id, UserId: 1, TokenId: 1, TokenKey: "mj-matrix-key", OriginModelName: "mj_imagine", ChannelMeta: &relaycommon.ChannelMeta{ChannelId: 2}}
+				}
+				info := newInfo("mj-" + scenario)
+				task := &model.Midjourney{UserId: 1, ChannelId: 1, Action: "IMAGINE", MjId: "shared-upstream-id", Status: "IN_PROGRESS", Progress: "0%", Quota: 100}
+				balances := func(wallet, remaining, used int) {
+					var user model.User
+					var token model.Token
+					require.NoError(t, db.First(&user, 1).Error)
+					require.NoError(t, db.Unscoped().First(&token, 1).Error)
+					assert.Equal(t, wallet, user.Quota)
+					assert.Equal(t, remaining, token.RemainQuota)
+					assert.Equal(t, used, token.UsedQuota)
+				}
+				if scenario == "legacy_unknown" {
+					require.NoError(t, db.Create(task).Error)
+					assert.False(t, RefundMidjourneyQuota(ctx, task, "legacy"))
+					balances(1000, 1000, 0)
+					assert.Equal(t, 100, task.Quota)
+					return
+				}
+				if scenario == "balance_race" {
+					require.NoError(t, db.Model(&model.User{}).Where("id = ?", 1).Update("quota", 100).Error)
+					var wg sync.WaitGroup
+					errs := make(chan error, 2)
+					for i := 0; i < 2; i++ {
+						wg.Add(1)
+						go func(id int) {
+							defer wg.Done()
+							errs <- PreConsumeMidjourneyBilling(nil, newInfo(fmt.Sprintf("mj-race-%d", id)), 100, true)
+						}(i)
+					}
+					wg.Wait()
+					close(errs)
+					accepted := 0
+					for err := range errs {
+						if err == nil {
+							accepted++
+						} else {
+							assert.ErrorIs(t, err, model.ErrBillingWalletInsufficient)
+						}
+					}
+					assert.Equal(t, 1, accepted)
+					balances(0, 900, 100)
+					return
+				}
+				if scenario == "reserve_token_failure" {
+					name := "fork:mj-reserve-token"
+					require.NoError(t, db.Callback().Update().Before("gorm:update").Register(name, func(tx *gorm.DB) {
+						if tx.Statement.Table == "billing_fork_tokens" {
+							tx.AddError(errors.New("injected token reserve failure"))
+						}
+					}))
+					require.Error(t, PreConsumeMidjourneyBilling(nil, info, 100, true))
+					require.NoError(t, db.Callback().Update().Remove(name))
+					balances(1000, 1000, 0)
+					return
+				}
+				free := scenario == "free_inpaint" || scenario == "free_zoom"
+				require.NoError(t, PreConsumeMidjourneyBilling(nil, info, 100, !free))
+				if scenario == "transport_unknown" || scenario == "local_failure" {
+					description := "do_request_failed"
+					if scenario == "local_failure" {
+						description = "create_request_failed"
+					}
+					RecordMidjourneySubmitFailure(info, description)
+					if scenario == "local_failure" {
+						balances(1000, 1000, 0)
+					} else {
+						balances(900, 900, 100)
+						assert.ErrorIs(t, RecoverBillingSession(ctx, info.RequestId), model.ErrBillingOutcomeUnknown)
+					}
+					return
+				}
+				if scenario == "immediate_success" {
+					task.Status, task.Progress = "SUCCESS", "100%"
+				}
+				known := scenario != "http_unknown" && scenario != "empty_identity"
+				if scenario == "empty_identity" {
+					task.MjId = ""
+				}
+				if scenario == "queued22" {
+					task.Code = 22
+				}
+				if scenario == "code21" {
+					task.Code = 21
+				}
+				accepted := scenario != "reject"
+				if scenario == "insert_failure" {
+					name := "fork:mj-insert"
+					require.NoError(t, db.Callback().Create().Before("gorm:create").Register(name, func(tx *gorm.DB) {
+						if tx.Statement.Table == "billing_fork_midjourneys" {
+							tx.AddError(errors.New("injected MJ insert failure"))
+						}
+					}))
+					_, err := PersistMidjourneyBilling(info, task, 100, true, true, true)
+					require.Error(t, err)
+					require.NoError(t, db.Callback().Create().Remove(name))
+					var count int64
+					require.NoError(t, db.Model(&model.Midjourney{}).Count(&count).Error)
+					assert.Zero(t, count)
+					balances(900, 900, 100)
+					task.Id = 0
+				}
+				if scenario == "accept_poll_race" {
+					task.TokenId, task.BillingChannelId, task.BillingRequestID = 1, 2, info.RequestId
+					require.NoError(t, model.CreateMidjourneyBillingResult(ctx, info.RequestId, task, 100, model.BillingTaskAcceptPending))
+					task.Status, task.Progress = "FAILURE", "100%"
+					_, err := model.CommitMidjourneyBillingResult(ctx, task, "IN_PROGRESS", true)
+					assert.ErrorIs(t, err, model.ErrBillingIntentConflict)
+					var stored model.Midjourney
+					require.NoError(t, db.First(&stored, task.Id).Error)
+					assert.Equal(t, "IN_PROGRESS", stored.Status)
+					require.NoError(t, RecoverBillingSession(ctx, info.RequestId))
+					won, err := CommitMidjourneyOutcome(ctx, task, "IN_PROGRESS", true)
+					require.NoError(t, err)
+					assert.True(t, won)
+					balances(1000, 1000, 0)
+					return
+				}
+				_, err := PersistMidjourneyBilling(info, task, 100, !free && accepted, accepted, known)
+				require.NoError(t, err)
+				if !known {
+					balances(900, 900, 100)
+					assert.ErrorIs(t, RecoverBillingSession(ctx, info.RequestId), model.ErrBillingOutcomeUnknown)
+					return
+				}
+				if !accepted || free {
+					balances(1000, 1000, 0)
+				} else {
+					balances(900, 900, 100)
+				}
+				if !accepted || scenario == "immediate_success" {
+					return
+				}
+				if scenario == "code21" {
+					secondInfo := newInfo("mj-code21-second")
+					require.NoError(t, PreConsumeMidjourneyBilling(nil, secondInfo, 100, true))
+					secondTask := &model.Midjourney{UserId: 1, ChannelId: 1, Code: 21, MjId: task.MjId, Status: "IN_PROGRESS", Progress: "0%"}
+					_, err := PersistMidjourneyBilling(secondInfo, secondTask, 100, true, true, true)
+					require.NoError(t, err)
+					balances(800, 800, 200)
+					secondTask.Status, secondTask.Progress = "FAILURE", "100%"
+					_, err = CommitMidjourneyOutcome(ctx, secondTask, "IN_PROGRESS", true)
+					require.NoError(t, err)
+					balances(900, 900, 100)
+				}
+				if scenario == "deleted_token" {
+					require.NoError(t, db.Delete(&model.Token{}, 1).Error)
+				}
+				task.Status, task.Progress = "FAILURE", "100%"
+				if scenario == "terminal_intent_failure" {
+					name := "fork:mj-terminal"
+					require.NoError(t, db.Callback().Update().Before("gorm:update").Register(name, func(tx *gorm.DB) {
+						if tx.Statement.Table == "billing_fork_fork_billing_sessions" {
+							tx.AddError(errors.New("injected MJ intent failure"))
+						}
+					}))
+					_, err := CommitMidjourneyOutcome(ctx, task, "IN_PROGRESS", true)
+					require.Error(t, err)
+					require.NoError(t, db.Callback().Update().Remove(name))
+					var stored model.Midjourney
+					require.NoError(t, db.First(&stored, task.Id).Error)
+					assert.Equal(t, "IN_PROGRESS", stored.Status)
+				}
+				if scenario == "refund_token_failure" {
+					name := "fork:mj-refund-token"
+					require.NoError(t, db.Callback().Update().Before("gorm:update").Register(name, func(tx *gorm.DB) {
+						if tx.Statement.Table == "billing_fork_tokens" {
+							tx.AddError(errors.New("injected refund token failure"))
+						}
+					}))
+					_, err := CommitMidjourneyOutcome(ctx, task, "IN_PROGRESS", true)
+					require.Error(t, err)
+					require.NoError(t, db.Callback().Update().Remove(name))
+					balances(900, 900, 100)
+					name = "fork:mj-refund-marker"
+					require.NoError(t, db.Callback().Update().Before("gorm:update").Register(name, func(tx *gorm.DB) {
+						if tx.Statement.Table == "billing_fork_midjourneys" {
+							tx.AddError(errors.New("injected refund marker failure"))
+						}
+					}))
+					require.Error(t, RecoverBillingSession(ctx, info.RequestId))
+					require.NoError(t, db.Callback().Update().Remove(name))
+					balances(900, 900, 100)
+					require.NoError(t, RecoverBillingSession(ctx, info.RequestId))
+					balances(1000, 1000, 0)
+					return
+				}
+				if scenario == "timeout_unknown" {
+					_, err := CommitMidjourneyOutcome(ctx, task, "IN_PROGRESS", false)
+					require.NoError(t, err)
+					assert.False(t, RefundMidjourneyQuota(ctx, task, "late refund must not undo unknown"))
+					balances(900, 900, 100)
+					return
+				}
+				var wg sync.WaitGroup
+				wins := make(chan bool, 4)
+				errs := make(chan error, 4)
+				for i := 0; i < 4; i++ {
+					copyTask := *task
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						won, err := CommitMidjourneyOutcome(ctx, &copyTask, "IN_PROGRESS", true)
+						wins <- won
+						errs <- err
+					}()
+				}
+				wg.Wait()
+				close(wins)
+				close(errs)
+				wonCount := 0
+				for won := range wins {
+					if won {
+						wonCount++
+					}
+				}
+				assert.Equal(t, 1, wonCount)
+				for err := range errs {
+					require.NoError(t, err)
+				}
+				won, err := CommitMidjourneyOutcome(ctx, task, "IN_PROGRESS", true)
+				require.NoError(t, err)
+				assert.False(t, won)
+				require.NoError(t, RecoverBillingSession(ctx, info.RequestId))
+				balances(1000, 1000, 0)
+				var channel model.Channel
+				require.NoError(t, db.First(&channel, 1).Error)
+				assert.Zero(t, channel.UsedQuota)
+				channel = model.Channel{}
+				require.NoError(t, db.First(&channel, 2).Error)
+				assert.Zero(t, channel.UsedQuota)
+			})
+		}
+	})
+}
+
+func TestBillingRecoveryLegacyEvidenceMissing(t *testing.T) {
+	forEachBillingRecoveryDB(t, func(t *testing.T, db *gorm.DB) {
+		ctx := context.Background()
+		// Only the wallet was charged for this old task. Token UsedQuota belongs
+		// to other requests; its nonnegative total cannot prove this task's debit.
+		require.NoError(t, db.Model(&model.User{}).Where("id = ?", 1).Update("quota", 900).Error)
+		require.NoError(t, db.Model(&model.Token{}).Where("id = ?", 1).Update("used_quota", 500).Error)
+		for i, request := range []string{"", "old-request-without-ledger"} {
+			task := &model.Task{UserId: 1, Quota: 100, Status: model.TaskStatusInProgress, PrivateData: model.TaskPrivateData{TokenId: 1, BillingSource: BillingSourceWallet}}
+			if request != "" {
+				task.PrivateData.Execution = &model.TaskExecutionSnapshot{RequestID: request}
+			}
+			require.NoError(t, db.Create(task).Error)
+			assert.False(t, RefundTaskQuota(ctx, task, "historical unknown"))
+			row, err := model.GetBillingSession(ctx, fmt.Sprintf("legacy-task:%d", task.ID))
+			require.NoError(t, err)
+			assert.Equal(t, model.BillingLegacyUnknown, row.Status)
+			assert.Zero(t, row.ReservedQuota)
+			assert.Nil(t, row.ActualQuota)
+			assert.ErrorIs(t, RecoverBillingSession(ctx, row.RequestID), model.ErrBillingOutcomeUnknown)
+			task.Status = model.TaskStatusFailure
+			won, err := commitTerminalTaskBilling(ctx, &mockAdaptor{}, task, relaycommon.FailTaskInfo("known historical failure"), model.TaskStatusInProgress, true)
+			require.NoError(t, err)
+			assert.True(t, won)
+			require.NoError(t, db.First(task, task.ID).Error)
+			assert.Equal(t, 100, task.Quota)
+			rows, err := model.ListUnresolvedBillingSessions(ctx, 100)
+			require.NoError(t, err)
+			assert.Len(t, rows, i+1)
+		}
+		result, err := RecoverBillingSessions(ctx, 100)
+		require.NoError(t, err)
+		assert.Zero(t, result.Scanned)
+		var user model.User
+		var token model.Token
+		require.NoError(t, db.First(&user, 1).Error)
+		require.NoError(t, db.First(&token, 1).Error)
+		assert.Equal(t, 900, user.Quota)
+		assert.Equal(t, 1000, token.RemainQuota)
+		assert.Equal(t, 500, token.UsedQuota)
+	})
 }

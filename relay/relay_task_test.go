@@ -118,9 +118,15 @@ func TestRealtimeFetchRefundsTaskItFindsFailed(t *testing.T) {
 		Status: model.TaskStatusInProgress, Progress: "50%",
 		PrivateData: model.TaskPrivateData{
 			Key: "channel-key", UpstreamTaskID: base64.RawURLEncoding.EncodeToString([]byte("operations/task-1")),
+			BillingSource: "wallet", Execution: &model.TaskExecutionSnapshot{RequestID: "realtime-refund-billing"},
 		},
 	}
 	require.NoError(t, database.Create(task).Error)
+	require.NoError(t, database.Create(&model.ForkBillingSession{
+		RequestID: "realtime-refund-billing", UserID: task.UserId, Playground: true,
+		FundingSource: "wallet", TaskID: task.ID, ReservedQuota: 1000, TaskAccountedQuota: 1000,
+		TaskAccepted: true, Status: model.BillingTaskActive, Revision: 1,
+	}).Error)
 
 	tryRealtimeFetch(task, true)
 

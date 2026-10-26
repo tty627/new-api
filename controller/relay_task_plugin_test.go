@@ -578,6 +578,8 @@ export function buildQueryRequest(){throw new Error("completed submissions must 
 			common.SetContextKey(c, constant.ContextKeyChannelId, ch.Id)
 			common.SetContextKey(c, constant.ContextKeyChannelType, ch.Type)
 			info := taskSubmissionRelayInfo(nil)
+			info.RequestId = common.NewRequestId()
+			c.Set(common.RequestIdKey, info.RequestId)
 			info.UserId = user.Id
 			info.OriginModelName = "document-model"
 			info.UserGroup = "default"

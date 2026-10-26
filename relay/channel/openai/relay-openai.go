@@ -181,6 +181,17 @@ func OaiStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp *http.Re
 		}
 	}
 
+	// EOF (or a transport interruption) without either a protocol terminal or
+	// explicit provider usage does not establish a final bill. Preserve partial
+	// output, but do not invent estimated usage and a successful ending. The
+	// durable billing failure policy keeps this reservation for reconciliation.
+	outcome := info.StreamStatus.OutcomeSnapshot()
+	if !containStreamUsage && outcome.Response != relaycommon.ResponseOutcomeCompleted && outcome.EndReason != relaycommon.StreamEndReasonDone {
+		info.StreamStatus.MarkIncomplete("upstream_stream_interrupted")
+		return nil, types.NewOpenAIError(fmt.Errorf("upstream stream ended without a completion or usage"),
+			types.ErrorCodeBadResponseBody, http.StatusBadGateway, types.ErrOptionWithSkipRetry())
+	}
+
 	if !containStreamUsage {
 		usage = service.ResponseText2Usage(c, responseTextBuilder.String(), info.UpstreamModelName, info.GetEstimatePromptTokens())
 		usage.CompletionTokens += toolCount * 7

@@ -338,7 +338,7 @@ func TestUpdateBatchTasksSettlesTieredUsageForTerminalStates(t *testing.T) {
 				TaskUsageBilling: true,
 			}
 			seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
-			require.NoError(t, model.DB.Create(task).Error)
+			seedAcceptedWalletTask(t, task)
 
 			upstreamID := task.GetUpstreamTaskID()
 			reason := ""
@@ -406,7 +406,7 @@ func TestUpdateBatchTasksRefundsFailedTieredTask(t *testing.T) {
 		EstimatedTier:    "actual",
 	}
 	seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
-	require.NoError(t, model.DB.Create(task).Error)
+	seedAcceptedWalletTask(t, task)
 
 	upstreamID := task.GetUpstreamTaskID()
 	adaptor := &batchPollingAdaptor{results: map[string]*BatchTaskResult{
@@ -455,7 +455,7 @@ func TestUpdateBatchTasksRefundsFailedTaskWithoutUsageSettlement(t *testing.T) {
 	task.PrivateData.UpstreamTaskID = "upstream_batch_refund"
 	task.PrivateData.BillingContext.OriginModelName = "missing-batch-token-price"
 	seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
-	require.NoError(t, model.DB.Create(task).Error)
+	seedAcceptedWalletTask(t, task)
 
 	upstreamID := task.GetUpstreamTaskID()
 	adaptor := &batchPollingAdaptor{results: map[string]*BatchTaskResult{
@@ -674,7 +674,7 @@ func TestUpdateSunoTasksStalePollsRefundExactlyOnce(t *testing.T) {
 	task.SubmitTime = time.Now().Unix()
 	task.PrivateData.UpstreamTaskID = upstreamTaskID
 	seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
-	require.NoError(t, model.DB.Create(task).Error)
+	seedAcceptedWalletTask(t, task)
 
 	var firstPollTask model.Task
 	var staleSecondPollTask model.Task
@@ -757,7 +757,7 @@ func TestSweepTimedOutTasksPreservesUnknownBilling(t *testing.T) {
 	modernTask.TaskID = "modern_timeout_without_assuming_refund"
 	modernTask.Progress = "50%"
 	modernTask.SubmitTime = 1771718400 // 2026-02-22 00:00:00 UTC
-	require.NoError(t, model.DB.Create(modernTask).Error)
+	seedAcceptedWalletTask(t, modernTask)
 
 	previousTimeout := constant.TaskTimeoutMinutes
 	constant.TaskTimeoutMinutes = 1
@@ -942,7 +942,7 @@ func TestUpdateVideoSingleTaskPollClassification(t *testing.T) {
 				task.PrivateData.PluginState = []byte(testCase.priorState)
 			}
 			seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
-			require.NoError(t, model.DB.Create(task).Error)
+			seedAcceptedWalletTask(t, task)
 
 			adaptor := &scriptedPollingAdaptor{statusCode: testCase.statusCode, fetchErr: testCase.fetchErr, parse: testCase.parse, parseErr: testCase.parseErr}
 			require.NoError(t, updateVideoSingleTask(context.Background(), adaptor, ch, task.GetUpstreamTaskID(), map[string]*model.Task{
@@ -1023,7 +1023,7 @@ func TestUpdateBatchTasksPollClassification(t *testing.T) {
 			task.TaskID = "task_batch_class"
 			task.PrivateData.UpstreamTaskID = "upstream_batch_class"
 			seedChargedAccounting(t, task.UserId, task.ChannelId, task.PrivateData.TokenId, task.Quota, 1)
-			require.NoError(t, model.DB.Create(task).Error)
+			seedAcceptedWalletTask(t, task)
 			upstreamID := task.GetUpstreamTaskID()
 
 			adaptor := &scriptedBatchPollingAdaptor{

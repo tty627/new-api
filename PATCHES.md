@@ -40,12 +40,23 @@ Rules (FORK-02):
 | P24 | `service/text_quota_test.go` · DB fixture | Migrate durable billing tables used by factory-created billing sessions | BILL-01 | Yes | active |
 | P25 | `service/relay_error_test.go` · retry policy cases | Assert uncertain upstream outcomes do not replay even with retry budget | BILL-05 | Yes | active |
 | P26 | `service/task_polling_test.go` · timeout regression | Preserve both old and new unknown task quotas and avoid fabricated refunds | BILL-05, TASK-02 | Yes | active |
-| P27 | `relay/relay_task_test.go` · failed task fixture | Migrate durable billing tables and seed the historical charged usage that is being refunded | BILL-04 | Yes | active |
+| P27 | `relay/relay_task_test.go` · failed task fixture | Seed a modern task ledger and its charged usage for the refund regression | BILL-04 | Yes | active |
 | P28 | `controller/responses_websocket_test.go` · DB fixture | Migrate ledger tables used by real WebSocket billing | BILL-01 | Yes | active |
-| P29 | `controller/relay_task_plugin_test.go` · dialect fixture | Include ledger tables for real task submission contracts | BILL-01, TASK-02 | Yes | active |
-| P30 | `controller/plugin_native_e2e_test.go` · task fixture | Include ledger tables for native task submission and settlement | BILL-01, TASK-02 | Yes | active |
+| P29 | `controller/relay_task_plugin_test.go` · dialect fixture | Include ledger tables and consistent context/session request identities for real task submission contracts | BILL-01, TASK-02 | Yes | active |
+| P30 | `controller/plugin_native_e2e_test.go` · task fixture | Use the real durable billing session for native task submission and settlement | BILL-01, TASK-02 | Yes | active |
 | P31 | `controller/plugin_protocol_test.go` · terminal fixture | Seed the previously charged user and ledger tables for disconnect-during-settlement regression | BILL-04, TASK-02 | Yes | active |
 | P32 | `service/funding_source.go` · subscription source | Resolve adjustments against the original request and cycle instead of unrestricted deltas | CYCLE-02, CYCLE-04 | Yes | active |
+| P33 | `controller/billing_option_test.go` · policy fixture | Include ledger tables used by real pre-consumption policy tests | BILL-01 | Yes | active |
+| P34 | `e2e/doc_parse_test.go` · document task fixture | Include persisted owner and ledger tables for real batch completion | BILL-04, TASK-02 | Yes | active |
+| P35 | `controller/access_token_audit_test.go` · SQLite fixture | Close the original SQLite connection even when callers reopen the database; allow Windows cleanup | REL-02 | Yes | active |
+| P36 | `controller/user.go` · failed redemption log | Exclude the usable redemption code from failure logs | OPS-04 | Yes | active |
+| P37 | `common/log_text.zh-CN.json` · redemption log translation | Match the redacted log without a redemption-code argument | OPS-04 | Yes | active |
+| P38 | `relay/channel/openai/relay-openai.go` · chat stream completion | Treat a truncated stream without terminal evidence or provider usage as unknown; retain its reservation and prevent replay | BILL-05, RELAY-02 | Yes | active |
+| P39 | `relay/channel/openai/stream_tool_billing_test.go` · stream completion regressions | Reproduce truncated EOF and retain compatibility for explicit finish, usage and DONE | BILL-05, RELAY-02 | Yes | active |
+| P40 | `model/midjourney.go` · task schema | Persist the private billing request identity used for atomic task accounting | BILL-01, BILL-03, TASK-02 | Yes | active |
+| P41 | `relay/mjproxy_handler.go` · submit and swap-face handlers | Reserve wallet and token before upstream calls; atomically persist accepted task and billing intent; preserve uncertain outcomes | BILL-01, BILL-03, BILL-05, TASK-02 | Yes | active |
+| P42 | `controller/midjourney.go` · polling and completion | Persist terminal evidence with billing intent, retain unknown reservations and handle separate local requests sharing an upstream task ID | BILL-03, BILL-04, BILL-05, TASK-02 | Yes | active |
+| P43 | `service/midjourney.go` · legacy settlement entry | Reject unproven direct settlement; route active callers through request-aware durable accounting | BILL-04, BILL-05 | Yes | active |
 
 P2–P7 are one upstreamable unit (subscription order snapshot + entitlement link). `FORK_SUBSCRIPTION_LINK_ENABLED=false` turns P2–P4 back into upstream behaviour without a rebuild.
 
@@ -60,6 +71,7 @@ P2–P7 are one upstreamable unit (subscription order snapshot + entitlement lin
 - `subscription_link_backfill_fork.go`, `subscription_link_backfill_fork_test.go` (`new-api link-backfill [--apply] [--window 300]`)
 - `scripts/fork-migration-matrix.sh`
 - `model/billing_session_fork.go`, `service/billing_recovery_fork.go`, `service/billing_recovery_fork_test.go`
+- `model/billing_midjourney_fork.go`, `service/midjourney_billing_fork.go`
 - `model/subscription_cycle_fork.go`, `model/subscription_cycle_fork_test.go`
 - `runtime_fork.go`, `billing_recovery_fork.go`
 - `test/contract/` (DEP-01 … DEP-05 contract tests; `testdata/money_golden.json` is shared with the payment bridge)
