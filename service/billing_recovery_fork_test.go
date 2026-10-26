@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -177,6 +178,15 @@ func forEachBillingRecoveryDB(t *testing.T, fn func(*testing.T, *gorm.DB)) {
 				}
 				if dsn == "" {
 					t.Skip("TEST_MYSQL_DSN is not configured")
+				}
+				// Match the production connection default, including soft-deleted
+				// rows whose non-NULL deleted_at must scan into time.Time.
+				if !strings.Contains(dsn, "parseTime") {
+					separator := "?"
+					if strings.Contains(dsn, "?") {
+						separator = "&"
+					}
+					dsn += separator + "parseTime=true"
 				}
 				driver, kind = mysql.Open(dsn), common.DatabaseTypeMySQL
 			case "postgres":
@@ -570,7 +580,7 @@ func TestBillingRecoveryCacheRepairAndFactoryClaim(t *testing.T) {
 func TestBillingRecoveryMidjourneyMatrix(t *testing.T) {
 	forEachBillingRecoveryDB(t, func(t *testing.T, db *gorm.DB) {
 		ctx := context.Background()
-		cases := []string{"accepted", "code21", "queued22", "immediate_success", "free_inpaint", "free_zoom", "reject", "http_unknown", "transport_unknown", "local_failure", "empty_identity", "insert_failure", "reserve_token_failure", "refund_token_failure", "terminal_intent_failure", "timeout_unknown", "deleted_token", "legacy_unknown", "balance_race", "accept_poll_race"}
+		cases := []string{"accepted", "code21", "queued22", "immediate_success", "free_inpaint", "free_zoom", "reject", "http_unknown", "transport_unknown", "local_failure", "empty_identity", "empty_body", "insert_failure", "reserve_token_failure", "refund_token_failure", "terminal_intent_failure", "timeout_unknown", "deleted_token", "legacy_unknown", "balance_race", "accept_poll_race"}
 		for _, scenario := range cases {
 			t.Run(scenario, func(t *testing.T) {
 				for _, table := range []any{&model.ForkBillingEvent{}, &model.ForkBillingSession{}, &model.Midjourney{}, &model.Token{}, &model.User{}, &model.Channel{}} {
@@ -657,9 +667,12 @@ func TestBillingRecoveryMidjourneyMatrix(t *testing.T) {
 				if scenario == "immediate_success" {
 					task.Status, task.Progress = "SUCCESS", "100%"
 				}
-				known := scenario != "http_unknown" && scenario != "empty_identity"
+				known := scenario != "http_unknown" && scenario != "empty_identity" && scenario != "empty_body"
 				if scenario == "empty_identity" {
 					task.MjId = ""
+				}
+				if scenario == "empty_body" {
+					task.MjId, task.Code = "", 5
 				}
 				if scenario == "queued22" {
 					task.Code = 22
@@ -667,7 +680,7 @@ func TestBillingRecoveryMidjourneyMatrix(t *testing.T) {
 				if scenario == "code21" {
 					task.Code = 21
 				}
-				accepted := scenario != "reject"
+				accepted := scenario != "reject" && scenario != "empty_body"
 				if scenario == "insert_failure" {
 					name := "fork:mj-insert"
 					require.NoError(t, db.Callback().Create().Before("gorm:create").Register(name, func(tx *gorm.DB) {
@@ -701,12 +714,18 @@ func TestBillingRecoveryMidjourneyMatrix(t *testing.T) {
 					return
 				}
 				_, err := PersistMidjourneyBilling(info, task, 100, !free && accepted, accepted, known)
-				require.NoError(t, err)
 				if !known {
+					assert.ErrorIs(t, err, model.ErrBillingOutcomeUnknown, "ambiguous response must not be returned as a successful submission")
+					row, readErr := model.GetBillingSession(ctx, info.RequestId)
+					require.NoError(t, readErr)
+					assert.Equal(t, model.BillingReserved, row.Status)
+					assert.Nil(t, row.ActualQuota)
+					assert.Equal(t, "upstream_outcome_unknown", row.LastErrorCode)
 					balances(900, 900, 100)
 					assert.ErrorIs(t, RecoverBillingSession(ctx, info.RequestId), model.ErrBillingOutcomeUnknown)
 					return
 				}
+				require.NoError(t, err)
 				if !accepted || free {
 					balances(1000, 1000, 0)
 				} else {

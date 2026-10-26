@@ -54,7 +54,7 @@ Rules (FORK-02):
 | P38 | `relay/channel/openai/relay-openai.go` · chat stream completion | Treat a truncated stream without terminal evidence or provider usage as unknown; retain its reservation and prevent replay | BILL-05, RELAY-02 | Yes | active |
 | P39 | `relay/channel/openai/stream_tool_billing_test.go` · stream completion regressions | Reproduce truncated EOF and retain compatibility for explicit finish, usage and DONE | BILL-05, RELAY-02 | Yes | active |
 | P40 | `model/midjourney.go` · task schema | Persist the private billing request identity used for atomic task accounting | BILL-01, BILL-03, TASK-02 | Yes | active |
-| P41 | `relay/mjproxy_handler.go` · submit and swap-face handlers | Reserve wallet and token before upstream calls; atomically persist accepted task and billing intent; preserve uncertain outcomes | BILL-01, BILL-03, BILL-05, TASK-02 | Yes | active |
+| P41 | `relay/mjproxy_handler.go` · submit and swap-face handlers | Reserve wallet and token before upstream calls; atomically persist accepted task and billing intent; return an explicit verification error for uncertain outcomes while retaining the reservation | BILL-01, BILL-03, BILL-05, TASK-02 | Yes | active |
 | P42 | `controller/midjourney.go` · polling and completion | Persist terminal evidence with billing intent, retain unknown reservations and handle separate local requests sharing an upstream task ID | BILL-03, BILL-04, BILL-05, TASK-02 | Yes | active |
 | P43 | `service/midjourney.go` · legacy settlement entry | Reject unproven direct settlement; route active callers through request-aware durable accounting | BILL-04, BILL-05 | Yes | active |
 

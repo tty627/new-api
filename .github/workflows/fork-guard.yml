@@ -73,7 +73,7 @@ jobs:
     env:
       GOWORK: 'off'
       TEST_POSTGRES_DSN: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
-      TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mysql
+      TEST_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mysql?parseTime=true
       TEST_BILLING_POSTGRES_DSN: postgres://postgres@127.0.0.1:5432/postgres?sslmode=disable
       TEST_BILLING_MYSQL_DSN: root:root@tcp(127.0.0.1:3306)/mysql?parseTime=true
     steps:

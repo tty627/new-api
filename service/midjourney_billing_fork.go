@@ -93,7 +93,7 @@ func PersistMidjourneyBilling(info *relaycommon.RelayInfo, task *model.Midjourne
 		return false, err
 	}
 	if intent == "" {
-		return false, nil
+		return false, model.ErrBillingOutcomeUnknown
 	}
 	applied, err := model.ApplyBillingIntentOnce(ctx, s.durableRequestID)
 	if err == nil {

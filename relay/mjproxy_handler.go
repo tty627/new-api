@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -247,6 +248,9 @@ func RelaySwapFace(c *gin.Context, info *relaycommon.RelayInfo) *dto.MidjourneyR
 	known := mjResp.StatusCode == http.StatusOK && midjResponse.Code > 0 && midjResponse.Code != constant.MjErrorUnknown && (!accepted || midjourneyTask.MjId != "")
 	billingApplied, billingErr := service.PersistMidjourneyBilling(info, midjourneyTask, priceData.Quota, mjResp.StatusCode == http.StatusOK && midjResponse.Code == 1, accepted, known)
 	if billingErr != nil {
+		if errors.Is(billingErr, model.ErrBillingOutcomeUnknown) {
+			return service.MidjourneyErrorWrapper(constant.MjErrorUnknown, "outcome_requires_verification")
+		}
 		common.SysLog(common.LogText("error settling Midjourney quota: %s", billingErr.Error()))
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "persist_midjourney_billing_failed")
 	}
@@ -599,6 +603,9 @@ func RelayMidjourneySubmit(c *gin.Context, relayInfo *relaycommon.RelayInfo) *dt
 	known := midjResponseWithStatus.StatusCode == http.StatusOK && midjourneyTask.Code > 0 && midjourneyTask.Code != constant.MjErrorUnknown && (!accepted || !consumeQuota || midjourneyTask.MjId != "")
 	billingApplied, billingErr := service.PersistMidjourneyBilling(relayInfo, midjourneyTask, priceData.Quota, consumeQuota && midjResponseWithStatus.StatusCode == http.StatusOK, accepted, known)
 	if billingErr != nil {
+		if errors.Is(billingErr, model.ErrBillingOutcomeUnknown) {
+			return service.MidjourneyErrorWrapper(constant.MjErrorUnknown, "outcome_requires_verification")
+		}
 		common.SysLog(common.LogText("error settling Midjourney quota: %s", billingErr.Error()))
 		return service.MidjourneyErrorWrapper(constant.MjRequestError, "persist_midjourney_billing_failed")
 	}
